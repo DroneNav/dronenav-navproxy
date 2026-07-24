@@ -1,0 +1,57 @@
+protocol: MAVLink
+platform: ArduPilot
+
+commands:
+  MAV_CMD_NAV_WAYPOINT:
+    id: 16
+    description: Navigate to a waypoint.
+
+    parameters:
+      - position: 1
+        name: hold_time_seconds
+        type: number
+        required: false
+        default: 0
+        minimum: 0
+
+      - position: 2
+        name: acceptance_radius_meters
+        type: number
+        required: false
+        default: 0
+        minimum: 0
+
+      - position: 3
+        name: pass_radius_meters
+        type: number
+        required: false
+        default: 0
+        minimum: 0
+
+      - position: 4
+        name: yaw_degrees
+        type: number
+        required: false
+        default: 0
+        minimum: 0
+        maximum: 360
+
+      - position: 5
+        name: latitude
+        type: number
+        required: true
+        minimum: -90
+        maximum: 90
+
+      - position: 6
+        name: longitude
+        type: number
+        required: true
+        minimum: -180
+        maximum: 180
+
+      - position: 7
+        name: altitude_meters
+        type: number
+        required: true
+

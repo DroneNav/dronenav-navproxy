@@ -1,0 +1,9 @@
+{
+  "command": "MAV_CMD_NAV_WAYPOINT",
+  "parameters": {
+    "latitude": 34.075,
+    "longitude": -84.294,
+    "altitude_meters": 30,
+    "hold_time_seconds": 2
+  }
+}
