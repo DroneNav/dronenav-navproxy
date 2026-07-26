@@ -1,0 +1,22 @@
+{
+  "commands": [
+    {
+      "command": "MAV_CMD_NAV_TAKEOFF",
+      "parameters": {
+        "latitude": 34.075,
+        "longitude": -84.294,
+        "altitude_meters": 30
+      }
+    },
+    {
+      "command": "MAV_CMD_NAV_WAYPOINT",
+      "parameters": {
+        "hold_time_seconds": 2,
+        "latitude": 34.076,
+        "longitude": -84.293,
+        "altitude_meters": 30
+      }
+    }
+  ]
+}
+

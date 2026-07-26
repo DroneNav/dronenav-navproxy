@@ -3,3 +3,5 @@
 .git
 __pycache__/
 
+tooling/examples/fer_*.json
+
