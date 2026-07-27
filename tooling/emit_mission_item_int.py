@@ -7,9 +7,10 @@ structure required by MAVLink MISSION_ITEM_INT.
 
 Usage from the NAVProxy project directory:
 
+Usage:
+
     python -m tooling.emit_mission_item_int \
-        tooling/metadata/mavlink_commands.yaml \
-        tooling/examples/waypoint.json
+        tooling/examples/<command_name>.json
 """
 
 from __future__ import annotations
@@ -339,12 +340,6 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "metadata_file",
-        type=Path,
-        help="Path to MAVLink command metadata YAML.",
-    )
-
-    parser.add_argument(
         "command_file",
         type=Path,
         help="Path to the declarative command JSON file.",
@@ -380,7 +375,13 @@ def main() -> int:
     arguments = parse_arguments()
 
     try:
-        metadata = load_yaml_file(arguments.metadata_file)
+        metadata_path = (
+            Path(__file__).parent
+            / "metadata"
+            / "mavlink_commands.yaml"
+        )
+
+        metadata = load_yaml_file(metadata_path)
         command_instance = load_json_file(arguments.command_file)
 
         compiled_command = compile_command(

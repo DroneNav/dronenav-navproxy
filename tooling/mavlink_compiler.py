@@ -2,8 +2,7 @@
 
 Usage:
 
-    python -m tooling.compile_command_stream \
-        tooling/metadata/mavlink_commands.yaml \
+    python -m tooling.mavlink_compiler \
         tooling/examples/takeoff_waypoint_stream.json
 """
 
@@ -73,7 +72,7 @@ def load_json_file(path: str | Path) -> dict[str, Any]:
     return document
 
 
-def compile_command_stream(
+def compile_mavlink_command_stream(
     metadata: dict[str, Any],
     command_stream: dict[str, Any],
 ) -> dict[str, Any]:
@@ -122,22 +121,27 @@ def compile_command_stream(
 def main() -> int:
     """Command-line entry point."""
 
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 2:
         print(
-            "Usage: python -m tooling.compile_command_stream "
-            "<metadata.yaml> <command_stream.json>",
+            "Usage: python -m tooling.mavlink_compiler "
+            "<command_stream.json>",
             file=sys.stderr,
         )
         return 2
 
-    metadata_path = sys.argv[1]
-    stream_path = sys.argv[2]
+    stream_path = sys.argv[1]
+
+    metadata_path = (
+        Path(__file__).parent
+        / "metadata"
+        / "mavlink_commands.yaml"
+    )
 
     try:
         metadata = load_yaml_file(metadata_path)
         command_stream = load_json_file(stream_path)
 
-        compiled_stream = compile_command_stream(
+        compiled_stream = compile_mavlink_command_stream(
             metadata=metadata,
             command_stream=command_stream,
         )

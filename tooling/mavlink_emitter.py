@@ -10,9 +10,11 @@ This module:
 
 Usage:
 
-    python -m tooling.emit_mission_stream \
-        tooling/metadata/mavlink_commands.yaml \
-        tooling/examples/takeoff_waypoint_stream.json
+Usage:
+
+    python -m tooling.mavlink_emitter \
+        tooling/examples/fer_<uuid>.json
+
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from typing import Any
 
 import yaml
 
-from tooling.compile_command_stream import compile_command_stream
+from tooling.mavlink_compiler import compile_mavlink_command_stream
 from tooling.emit_mission_item_int import emit_mission_item_int
 
 
@@ -167,22 +169,27 @@ def emit_mission_stream(
 def main() -> int:
     """Run the complete command-stream compilation and emission pipeline."""
 
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 2:
         print(
-            "Usage: python -m tooling.emit_mission_stream "
-            "<metadata.yaml> <command_stream.json>",
+            "Usage: python -m tooling.mavlink_emitter "
+            "<fer_*.json>",
             file=sys.stderr,
         )
         return 2
 
-    metadata_path = sys.argv[1]
-    command_stream_path = sys.argv[2]
+    command_stream_path = sys.argv[1]
+
+    metadata_path = (
+        Path(__file__).parent
+        / "metadata"
+        / "mavlink_commands.yaml"
+    )
 
     try:
         metadata = load_yaml_file(metadata_path)
         declarative_stream = load_json_file(command_stream_path)
 
-        compiled_stream = compile_command_stream(
+        compiled_stream = compile_mavlink_command_stream(
             metadata,
             declarative_stream,
         )

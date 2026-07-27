@@ -1,3 +1,19 @@
+"""
+Compile a Flight Execution Record (FER) into a DroneNav declarative
+command stream.
+
+This tool:
+
+1. Loads a Flight Execution Record.
+2. Validates the operational flight.
+3. Compiles the FER into the DroneNav Intermediate Representation (IR).
+
+Usage:
+
+    python -m tooling.fer_compiler \
+        tooling/examples/fer_019f6bc9-b635-7a7f-95d9-e1f15fdadfb6.json
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -12,8 +28,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
-DEFAULT_API_BASE_URL = "https://api.dronenav.org"
-API_TIMEOUT_SECONDS = 10
+DEFAULT_API_BASE_URL = "http://api.dronenav.org"
+API_TIMEOUT_SECONDS = 15
 
 
 class FlightExecutionCompileError(ValueError):
@@ -737,6 +753,14 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> int:
+    if len(sys.argv) < 2:
+        print(
+            "Usage: python -m tooling.fer_compiler "
+            "<flight_execution_record.json>",
+            file=sys.stderr,
+        )
+        return 2
+
     arguments = parse_arguments()
 
     try:

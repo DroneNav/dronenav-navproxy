@@ -26,7 +26,7 @@ The generated document contains the complete FER and an empty command stream:
 
 Usage from the NAVProxy project root:
 
-    python tooling/build_compiler_input.py \
+    python tooling/build_fer_compiler_input.py \
         019f6bc9-b635-7a7f-95d9-e1f15fdadfb6
 """
 
@@ -250,6 +250,9 @@ def main() -> int:
     output_path = build_output_path(
         flight_execution_id=arguments.flight_execution_id,
     )
+
+    if output_path.exists():
+        return 0
 
     try:
         flight_execution = retrieve_flight_execution(
