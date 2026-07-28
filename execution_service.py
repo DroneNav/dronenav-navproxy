@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .drupal_client import notify_flight_plan_status
-from .flight_repository import (
+from .drupal_update_status import notify_flight_plan_status
+
+from .flight_log_service import (
     FlightProcessContext,
     load_and_validate_context,
     record_landing,
