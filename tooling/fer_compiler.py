@@ -28,7 +28,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
-DEFAULT_API_BASE_URL = "http://api.dronenav.org"
+DEFAULT_API_BASE_URL = "https://api.dronenav.org"
 API_TIMEOUT_SECONDS = 15
 
 
