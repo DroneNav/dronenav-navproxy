@@ -23,9 +23,11 @@ from .settings import (
 )
 from .simulator import FlightSimulator
 
+DEFAULT_API_BASE_URL = "https://api.dronenav.org"
+
+from .tooling.fer_compiler import load_flight_execution
 
 LOGGER = logging.getLogger(__name__)
-
 
 @dataclass(frozen=True)
 class AssertionResult:
@@ -151,6 +153,7 @@ def execute_flight_execution(
     )
 
     flight_execution = load_flight_execution(
+        DEFAULT_API_BASE_URL,
         context.flight_execution_id,
     )
 
@@ -169,14 +172,6 @@ def execute_flight_execution(
     )
 
     return preflight_result
-
-
-def load_flight_execution(
-    flight_execution_uuid: str,
-) -> dict[str, Any]:
-    """Load one Flight Execution Record from the Flight Execution API."""
-
-    raise NotImplementedError
 
 
 def build_fer_ir(
