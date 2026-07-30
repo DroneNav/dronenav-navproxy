@@ -72,6 +72,33 @@ def load_api_object(
     return value
 
 
+def load_flight_execution(
+    api_base_url: str,
+    flight_execution_id: str,
+) -> dict[str, Any]:
+    """Retrieve one Flight Execution Record from the DroneNav API."""
+
+    if not isinstance(flight_execution_id, str) or not flight_execution_id:
+        raise FlightExecutionCompileError(
+            "flight_execution_id must be a non-empty string."
+        )
+
+    response = load_api_object(
+        api_base_url=api_base_url,
+        endpoint=f"/api/flight-executions/{flight_execution_id}",
+        object_name="Flight Execution Record",
+    )
+
+    flight_execution = response.get("flight_execution", response)
+
+    if not isinstance(flight_execution, dict):
+        raise FlightExecutionCompileError(
+            "The Flight Execution API response must contain a JSON object."
+        )
+
+    return flight_execution
+
+
 def load_departure_droneport(
     api_base_url: str,
     departure_droneport_id: str,
@@ -697,6 +724,42 @@ def interpret_flight_execution(
     }
 
 
+def compile_flight_execution(
+    flight_execution: dict[str, Any],
+    api_base_url: str = DEFAULT_API_BASE_URL,
+) -> dict[str, Any]:
+    """Compile an already-loaded FER into the NAVProxy IR."""
+
+    if not isinstance(flight_execution, dict):
+        raise FlightExecutionCompileError(
+            "flight_execution must be a JSON object."
+        )
+
+    return interpret_flight_execution(
+        document={"flight_execution": flight_execution},
+        api_base_url=api_base_url,
+    )
+
+
+def load_and_compile_flight_execution(
+    flight_execution_id: str,
+    api_base_url: str = DEFAULT_API_BASE_URL,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load one FER from the API and compile it into the NAVProxy IR."""
+
+    flight_execution = load_flight_execution(
+        api_base_url=api_base_url,
+        flight_execution_id=flight_execution_id,
+    )
+
+    compiler_ir = compile_flight_execution(
+        flight_execution=flight_execution,
+        api_base_url=api_base_url,
+    )
+
+    return flight_execution, compiler_ir
+
+
 def load_json(path: Path) -> dict[str, Any]:
     """Load a JSON object from disk."""
 
@@ -766,8 +829,15 @@ def main() -> int:
     try:
         document = load_json(arguments.flight_execution)
 
-        command_stream = interpret_flight_execution(
-            document=document,
+        flight_execution = document.get("flight_execution")
+
+        if not isinstance(flight_execution, dict):
+            raise FlightExecutionCompileError(
+                "Input JSON is missing the flight_execution object."
+            )
+
+        command_stream = compile_flight_execution(
+            flight_execution=flight_execution,
             api_base_url=arguments.api_base_url,
         )
 
@@ -783,4 +853,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
