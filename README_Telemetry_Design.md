@@ -121,6 +121,20 @@ Responsibilities include:
 
 ---
 
+## Principle 4 – Transport Independence
+
+DroneNav Phase 3 shall maintain complete independence from any specific communications transport technology. The Flight Execution architecture, NAVProxy runtime, telemetry pipeline, and Flight Log lifecycle shall operate consistently regardless of the underlying communications medium.
+
+NAVProxy Standard requires only sufficient communications to safely prepare an aircraft for flight and to complete post-flight processing. Continuous connectivity during flight is an optional capability that enhances operational awareness but is not a prerequisite for autonomous mission execution. As a result, DroneNav Standard supports a broad spectrum of aircraft ranging from economical autonomous platforms utilizing Bluetooth or Wi-Fi for preflight and post-flight operations to professional and enterprise aircraft utilizing telemetry radios, Ethernet, Wi-Fi, LTE/5G, or future communications technologies.
+
+The underlying transport mechanism shall be treated as an implementation detail of the communications layer. Higher-level DroneNav services—including Flight Execution, policy enforcement, heartbeat monitoring, telemetry processing, Flight Logging, and governance—shall remain transport agnostic.
+
+This architectural separation enables DroneNav to support both low-cost autonomous aircraft and advanced enterprise platforms without altering the operational model. Future communications technologies may be introduced by extending the transport layer without requiring changes to the Flight Execution architecture or higher-level DroneNav services.
+
+By separating operational execution from communications technology, DroneNav ensures that governance, Flight Execution Records, and autonomous mission execution remain consistent across all supported aircraft regardless of cost, manufacturer, or communications capability.
+
+---
+
 # Architectural Statement
 
 NAVProxy is **not** an in-flight command authority.
@@ -143,3 +157,4 @@ DroneNav's responsibility is to:
 
 This separation of responsibilities preserves deterministic aircraft behavior while providing comprehensive operational telemetry and governance.
 
+---
