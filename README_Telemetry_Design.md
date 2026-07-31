@@ -4,6 +4,20 @@ These principles define the high-level architecture for DroneNav Phase 3 (Teleme
 
 ---
 
+## NAVProxy Product Scope
+
+Unless otherwise stated, the principles and requirements in this document define **NAVProxy Standard**, the core NAVProxy execution product used for general DroneNav operations.
+
+NAVProxy Standard prepares, validates, and deploys an approved Flight Execution Record to a supported flight controller. During flight, it may receive heartbeat, telemetry, mission progress, and aircraft-status information, but it does not exercise in-flight command authority. Bidirectional operational communication is limited to preflight preparation and post-flight processing.
+
+This restricted execution model is intentional. It provides broad compatibility across aircraft manufacturers, price ranges, flight-controller platforms, and communications technologies while preserving deterministic autonomous execution and a limited operational attack surface.
+
+A separate future product, **NavProxyFR**, is planned for authorized first-responder operations. NavProxyFR will share appropriate core DroneNav architecture and governance concepts, but it may support specialized capabilities such as secure in-flight command authority and authorized policy exceptions.
+
+NavProxyFR capabilities, security requirements, and operational workflows are outside the scope of this document. References to NAVProxy throughout this document therefore mean NAVProxy Standard unless explicitly stated otherwise.
+
+---
+
 # Principle 1 - Heartbeat Lifecycle Management
 
 NAVProxy shall maintain a heartbeat with the aircraft for the duration of an active flight.
