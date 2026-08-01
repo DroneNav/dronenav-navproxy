@@ -27,9 +27,10 @@ import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-
-DEFAULT_API_BASE_URL = "https://api.dronenav.org"
-API_TIMEOUT_SECONDS = 15
+from app.config.constants import (
+    DEFAULT_API_BASE_URL,
+    DEFAULT_API_TIMEOUT_SECONDS,
+)
 
 
 class FlightExecutionCompileError(ValueError):
@@ -37,19 +38,18 @@ class FlightExecutionCompileError(ValueError):
 
 
 def load_api_object(
-    api_base_url: str,
     endpoint: str,
     object_name: str,
 ) -> dict[str, Any]:
     """Retrieve one required object from the DroneNav API."""
 
-    url = f"{api_base_url.rstrip('/')}{endpoint}"
+    url = f"{DEFAULT_API_BASE_URL.rstrip('/')}{endpoint}"
 
     try:
         response = requests.get(
             url,
             headers={"Accept": "application/json"},
-            timeout=API_TIMEOUT_SECONDS,
+            timeout=DEFAULT_API_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
     except requests.RequestException as exc:
@@ -73,7 +73,6 @@ def load_api_object(
 
 
 def load_flight_execution(
-    api_base_url: str,
     flight_execution_id: str,
 ) -> dict[str, Any]:
     """Retrieve one Flight Execution Record from the DroneNav API."""
@@ -84,7 +83,6 @@ def load_flight_execution(
         )
 
     response = load_api_object(
-        api_base_url=api_base_url,
         endpoint=f"/api/flight-executions/{flight_execution_id}",
         object_name="Flight Execution Record",
     )
@@ -100,61 +98,51 @@ def load_flight_execution(
 
 
 def load_departure_droneport(
-    api_base_url: str,
     departure_droneport_id: str,
 ) -> dict[str, Any]:
     """Retrieve the departure DronePort referenced by the FER."""
 
     return load_api_object(
-        api_base_url=api_base_url,
         endpoint=f"/api/droneports/{departure_droneport_id}",
         object_name="departure DronePort",
     )
 
 def load_arrival_droneport(
-    api_base_url: str,
     arrival_droneport_id: str,
 ) -> dict[str, Any]:
     """Retrieve the arrival DronePort referenced by the FER."""
 
     return load_api_object(
-        api_base_url=api_base_url,
         endpoint=f"/api/droneports/{arrival_droneport_id}",
         object_name="arrival DronePort",
     )
 
 def load_origin_site(
-    api_base_url: str,
     origin_site_id: str,
 ) -> dict[str, Any]:
     """Retrieve the origin Site referenced by the FER."""
 
     return load_api_object(
-        api_base_url=api_base_url,
         endpoint=f"/api/sites/{origin_site_id}",
         object_name="origin Site",
     )
 
 def load_destination_site(
-    api_base_url: str,
     destination_site_id: str,
 ) -> dict[str, Any]:
     """Retrieve the destination Site referenced by the FER."""
 
     return load_api_object(
-        api_base_url=api_base_url,
         endpoint=f"/api/sites/{destination_site_id}",
         object_name="destination Site",
     )
 
 def load_flight_bands(
-    api_base_url: str,
     flight_class: str,
 ) -> list[dict[str, Any]]:
     """Retrieve active Flight Bands for the specified Flight Class."""
 
     response = load_api_object(
-        api_base_url=api_base_url,
         endpoint=(
             f"/api/flight-bands"
             f"?operational_status=active"
@@ -203,7 +191,6 @@ def extract_geometry(
 
 def build_launch_position_assertion(
     flight_execution: dict[str, Any],
-    api_base_url: str,
 ) -> dict[str, Any]:
     """
     Build exactly one launch-position assertion.
@@ -223,7 +210,6 @@ def build_launch_position_assertion(
             )
 
         departure_droneport = load_departure_droneport(
-            api_base_url=api_base_url,
             departure_droneport_id=departure_droneport_id,
         )
 
@@ -265,7 +251,6 @@ def build_launch_position_assertion(
         )
 
     origin_site = load_origin_site(
-        api_base_url=api_base_url,
         origin_site_id=origin_site_id,
     )
 
@@ -290,7 +275,6 @@ def build_launch_position_assertion(
 
 def build_arrival_position_assertion(
     flight_execution: dict[str, Any],
-    api_base_url: str,
 ) -> dict[str, Any]:
     """
     Build exactly one arrival-position assertion.
@@ -310,7 +294,6 @@ def build_arrival_position_assertion(
             )
 
         arrival_droneport = load_arrival_droneport(
-            api_base_url=api_base_url,
             arrival_droneport_id=arrival_droneport_id,
         )
 
@@ -359,7 +342,6 @@ def build_arrival_position_assertion(
         )
 
     destination_site = load_destination_site(
-        api_base_url=api_base_url,
         destination_site_id=destination_site_id,
     )
 
@@ -453,7 +435,6 @@ def build_departure_time_assertion(
 
 def build_flight_band_assertion(
     flight_execution: dict[str, Any],
-    api_base_url: str,
 ) -> dict[str, Any] | None:
     """
     Build the applicable Flight Band assertion for a corridor flight.
@@ -525,7 +506,6 @@ def build_flight_band_assertion(
     )
 
     flight_bands = load_flight_bands(
-        api_base_url=api_base_url,
         flight_class=flight_class,
     )
 
@@ -603,7 +583,6 @@ def build_flight_band_assertion(
 
 def build_route_assertions(
     flight_execution: dict[str, Any],
-    api_base_url: str,
 ) -> list[dict[str, Any]]:
     """
     Resolve all Route references in the Flight Execution Record.
@@ -619,7 +598,6 @@ def build_route_assertions(
 
     for route_id in route_ids:
         route = load_api_object(
-            api_base_url=api_base_url,
             endpoint=f"/api/routes/{route_id}",
             object_name="Route",
         )
@@ -644,7 +622,6 @@ def build_route_assertions(
 
 def interpret_flight_execution(
     document: dict[str, Any],
-    api_base_url: str,
 ) -> dict[str, Any]:
     """
     Interpret a Flight Execution Record into an ordered NAVProxy command stream.
@@ -668,7 +645,6 @@ def interpret_flight_execution(
 
     launch_assertion = build_launch_position_assertion(
         flight_execution=flight_execution,
-        api_base_url=api_base_url,
     )
 
     commands.append({
@@ -688,7 +664,6 @@ def interpret_flight_execution(
 
     flight_band_assertion = build_flight_band_assertion(
         flight_execution=flight_execution,
-        api_base_url=api_base_url,
     )
 
     if flight_band_assertion is not None:
@@ -699,7 +674,6 @@ def interpret_flight_execution(
 
     arrival_assertion = build_arrival_position_assertion(
         flight_execution=flight_execution,
-        api_base_url=api_base_url,
     )
 
     commands.append({
@@ -709,7 +683,6 @@ def interpret_flight_execution(
 
     route_assertions = build_route_assertions(
         flight_execution=flight_execution,
-        api_base_url=api_base_url,
     )
 
     for route_assertion in route_assertions:
@@ -726,7 +699,6 @@ def interpret_flight_execution(
 
 def compile_flight_execution(
     flight_execution: dict[str, Any],
-    api_base_url: str = DEFAULT_API_BASE_URL,
 ) -> dict[str, Any]:
     """Compile an already-loaded FER into the NAVProxy IR."""
 
@@ -737,24 +709,20 @@ def compile_flight_execution(
 
     return interpret_flight_execution(
         document={"flight_execution": flight_execution},
-        api_base_url=api_base_url,
     )
 
 
 def load_and_compile_flight_execution(
     flight_execution_id: str,
-    api_base_url: str = DEFAULT_API_BASE_URL,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Load one FER from the API and compile it into the NAVProxy IR."""
 
     flight_execution = load_flight_execution(
-        api_base_url=api_base_url,
         flight_execution_id=flight_execution_id,
     )
 
     compiler_ir = compile_flight_execution(
         flight_execution=flight_execution,
-        api_base_url=api_base_url,
     )
 
     return flight_execution, compiler_ir
@@ -803,15 +771,6 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
 
-    parser.add_argument(
-        "--api-base-url",
-        default=DEFAULT_API_BASE_URL,
-        help=(
-            "DroneNav API base URL. "
-            f"Default: {DEFAULT_API_BASE_URL}"
-        ),
-    )
-
     return parser.parse_args()
 
 
@@ -838,7 +797,6 @@ def main() -> int:
 
         command_stream = compile_flight_execution(
             flight_execution=flight_execution,
-            api_base_url=arguments.api_base_url,
         )
 
         json.dump(command_stream, sys.stdout, indent=2)
