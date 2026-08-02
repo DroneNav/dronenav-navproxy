@@ -55,14 +55,13 @@ class PreflightResult:
     assertion_results: tuple[AssertionResult, ...]
 
 
-
 def run_navproxy_process(
     flight_execution_id: str,
     flight_id: str,
     preflight_seconds: int = DEFAULT_PREFLIGHT_SECONDS,
     flight_seconds: int = DEFAULT_FLIGHT_SECONDS,
 ) -> None:
-    """Run one simulated NAVProxy-controlled aircraft flight."""
+    """Run one NAVProxy-controlled simulated aircraft flight."""
 
     simulator = FlightSimulator(
         preflight_seconds=_validate_wait_seconds(
@@ -75,9 +74,15 @@ def run_navproxy_process(
         ),
     )
 
+    flight_execution, compiler_ir = load_and_compile_flight_execution(
+        flight_execution_id=flight_execution_id,
+    )
+
     context = FlightProcessContext(
         flight_execution_id=flight_execution_id,
         flight_id=flight_id,
+        flight_execution=flight_execution,
+        compiler_ir=compiler_ir,
     )
 
     requested_departure_datetime = get_requested_departure_datetime(
@@ -85,10 +90,27 @@ def run_navproxy_process(
     )
 
     LOGGER.info(
-        "NAVProxy simulation started: execution=%s flight=%s",
+        "NAVProxy execution started: execution=%s flight=%s commands=%d",
         context.flight_execution_id,
         context.flight_id,
+        len(compiler_ir.get("commands", [])),
     )
+
+    preflight_result = execute_preflight(context)
+
+    record_preflight_result(
+        context,
+        preflight_result,
+    )
+
+    if preflight_result.status != constants.PreflightStatus.PASSED:
+        LOGGER.warning(
+            "NAVProxy execution stopped during preflight: "
+            "execution=%s flight=%s",
+            context.flight_execution_id,
+            context.flight_id,
+        )
+        return
 
     simulator.run_preflight()
 
@@ -121,7 +143,7 @@ def run_navproxy_process(
     )
 
     LOGGER.info(
-        "NAVProxy simulation completed: execution=%s flight=%s",
+        "NAVProxy execution completed: execution=%s flight=%s",
         context.flight_execution_id,
         context.flight_id,
     )
@@ -162,44 +184,6 @@ def _validate_wait_seconds(name: str, value: Any) -> int:
         raise ValueError(f"{name} must not be negative.")
 
     return normalized_value
-
-
-def execute_flight_execution(
-    flight_execution_id: str,
-    flight_id: str,
-) -> PreflightResult:
-    """
-    Begin execution of a Flight Execution Record.
-
-    The initial implementation ends after preflight validation.
-    """
-
-    flight_execution, compiler_ir = load_and_compile_flight_execution(
-        flight_execution_id=flight_execution_id,
-    )
-
-    context = FlightProcessContext(
-        flight_execution_id=flight_execution_id,
-        flight_id=flight_id,
-        flight_execution=flight_execution,
-        compiler_ir=compiler_ir,
-    )
-
-    LOGGER.info(
-        "Flight Execution Record loaded and compiled: "
-        "execution=%s commands=%d",
-        context.flight_execution_id,
-        len(compiler_ir.get("commands", [])),
-    )
-
-    preflight_result = execute_preflight(context)
-
-    record_preflight_result(
-        context,
-        preflight_result,
-    )
-
-    return preflight_result
 
 
 def execute_preflight(
@@ -314,8 +298,8 @@ def get_current_position() -> tuple[float, float]:
     """
 
     return (
-        34.07016556548612,
-        -84.30583172998348,
+        34.07717020483562,
+        -84.2999132820199,
     )
 
 

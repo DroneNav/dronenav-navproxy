@@ -19,9 +19,9 @@ def _parse_arguments() -> argparse.Namespace:
         help="Flight Execution UUID.",
     )
     parser.add_argument(
-        "--flight-log-id",
+        "--flight-id",
         required=True,
-        help="Flight Log UUID created during claim.",
+        help="Flight UUID created during claim.",
     )
     parser.add_argument(
         "--preflight-seconds",
@@ -48,7 +48,7 @@ def main() -> None:
 
     run_navproxy_process(
         flight_execution_id=arguments.flight_execution_id,
-        flight_log_id=arguments.flight_log_id,
+        flight_id=arguments.flight_id,
         preflight_seconds=arguments.preflight_seconds,
         flight_seconds=arguments.flight_seconds,
     )
