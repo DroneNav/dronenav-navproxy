@@ -437,10 +437,10 @@ def build_flight_band_assertion(
     flight_execution: dict[str, Any],
 ) -> dict[str, Any] | None:
     """
-    Build the applicable Flight Band assertion for a corridor flight.
+    Build the Flight Band preflight assertion for a corridor flight.
 
     Local Site flights do not contain Routes and do not use Flight Bands.
-    Flight Bands are evaluated in the priority order returned by the API.
+    Current Flight Band eligibility is evaluated during preflight.
     """
 
     route_ids = flight_execution.get("route_ids") or []
@@ -448,137 +448,15 @@ def build_flight_band_assertion(
     if not route_ids:
         return None
 
-    requested_departure = flight_execution.get(
-        "requested_departure_datetime"
-    )
-
-    if not isinstance(requested_departure, str):
-        raise FlightExecutionCompileError(
-            "Corridor flights require requested_departure_datetime."
-        )
-
-    operational_timezone = flight_execution.get(
-        "operational_timezone"
-    )
-
-    if not isinstance(operational_timezone, str) or not operational_timezone:
-        raise FlightExecutionCompileError(
-            "Corridor flights require operational_timezone."
-        )
-
-    flight_class = flight_execution.get("flight_class")
-
-    if not isinstance(flight_class, str) or not flight_class:
-        raise FlightExecutionCompileError(
-            "Corridor flights require flight_class."
-        )
-
-    try:
-        departure_datetime = datetime.fromisoformat(
-            requested_departure.replace("Z", "+00:00")
-        )
-    except ValueError as exc:
-        raise FlightExecutionCompileError(
-            "requested_departure_datetime is not a valid "
-            "ISO-8601 datetime."
-        ) from exc
-
-    if departure_datetime.tzinfo is None:
-        raise FlightExecutionCompileError(
-            "requested_departure_datetime must contain "
-            "a timezone offset."
-        )
-
-    try:
-        timezone = ZoneInfo(operational_timezone)
-    except ZoneInfoNotFoundError as exc:
-        raise FlightExecutionCompileError(
-            f"Unknown operational timezone: {operational_timezone}"
-        ) from exc
-
-    local_departure = departure_datetime.astimezone(timezone)
-
-    # Flight Band days use Sunday=0 through Saturday=6.
-    departure_day = (local_departure.weekday() + 1) % 7
-    departure_time = local_departure.time().replace(
-        second=0,
-        microsecond=0,
-    )
-
-    flight_bands = load_flight_bands(
-        flight_class=flight_class,
-    )
-
-    for flight_band in flight_bands:
-        if not isinstance(flight_band, dict):
-            raise FlightExecutionCompileError(
-                "Each Flight Band must be a JSON object."
-            )
-
-        days = flight_band.get("days")
-        start_time_value = flight_band.get("start_time")
-        end_time_value = flight_band.get("end_time")
-
-        if not isinstance(days, list):
-            raise FlightExecutionCompileError(
-                "Flight Band is missing its days array."
-            )
-
-        if departure_day not in days:
-            continue
-
-        if (
-            not isinstance(start_time_value, str)
-            or not isinstance(end_time_value, str)
-        ):
-            raise FlightExecutionCompileError(
-                "Flight Band start_time and end_time must be strings."
-            )
-
-        try:
-            start_time = datetime.strptime(
-                start_time_value,
-                "%H:%M",
-            ).time()
-
-            end_time = datetime.strptime(
-                end_time_value,
-                "%H:%M",
-            ).time()
-        except ValueError as exc:
-            raise FlightExecutionCompileError(
-                "Flight Band times must use HH:MM format."
-            ) from exc
-
-        if not start_time <= departure_time <= end_time:
-            continue
-
-        min_agl_ft = flight_band.get("min_agl_ft")
-        max_agl_ft = flight_band.get("max_agl_ft")
-
-        if (
-            isinstance(min_agl_ft, bool)
-            or not isinstance(min_agl_ft, (int, float))
-            or isinstance(max_agl_ft, bool)
-            or not isinstance(max_agl_ft, (int, float))
-            or max_agl_ft <= min_agl_ft
-        ):
-            raise FlightExecutionCompileError(
-                "Flight Band contains invalid altitude limits."
-            )
-
-        return {
-            "command": "NAV_ASSERT_FLIGHT_BAND",
-            "parameters": {
-                "min_agl_ft": min_agl_ft,
-                "max_agl_ft": max_agl_ft,
-            },
-        }
-
-    raise FlightExecutionCompileError(
-        "No active Flight Band applies to the corridor flight's "
-        "class and departure time."
-    )
+    return {
+        "command": "NAV_ASSERT_FLIGHT_BAND",
+        "parameters": {
+            "flight_class": flight_execution["flight_class"],
+            "operational_timezone": (
+                flight_execution["operational_timezone"]
+            ),
+        },
+    }
 
 
 def build_route_assertions(

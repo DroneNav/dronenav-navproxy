@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -31,7 +33,10 @@ from .settings import (
     FLIGHT_PLAN_STATUS_SUBMITTED,
 )
 from .simulator import FlightSimulator
-from .tooling.fer_compiler import load_and_compile_flight_execution
+from .tooling.fer_compiler import (
+    load_and_compile_flight_execution,
+    load_flight_bands,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -279,7 +284,10 @@ def execute_assertion(
         )
 
     if command == constants.NAV_ASSERT_DEPARTURE_TIME:
-        return assert_departure_time(assertion)
+        return assert_departure_time(
+            context,
+            assertion,
+        )
 
     if command == constants.NAV_ASSERT_FLIGHT_BAND:
         return assert_flight_band(assertion)
@@ -298,8 +306,8 @@ def get_current_position() -> tuple[float, float]:
     """
 
     return (
-        34.07717020483562,
-        -84.2999132820199,
+        34.076687671,
+        -84.300904604,
     )
 
 
@@ -404,20 +412,104 @@ def assert_arrival_in_geometry(
     context: FlightProcessContext,
     assertion: dict[str, Any],
 ) -> AssertionResult:
-    """Confirm that the destination remains operational before takeoff."""
+    """Confirm that the authorized destination remains operational."""
 
     if context.flight_execution is None:
         raise ValueError(
             "Flight process context is missing the Flight Execution Record."
         )
 
-    raise NotImplementedError
+    flight_execution = context.flight_execution
+
+    arrival_droneport_id = flight_execution.get(
+        "arrival_droneport_id"
+    )
+
+    if arrival_droneport_id:
+        if not isinstance(arrival_droneport_id, str):
+            raise ValueError(
+                "arrival_droneport_id must be a string or null."
+            )
+
+        destination_type = "arrival DronePort"
+        endpoint = (
+            f"{DEFAULT_API_BASE_URL.rstrip('/')}"
+            f"/api/droneports/{arrival_droneport_id}"
+        )
+    else:
+        destination_site_id = flight_execution.get(
+            "destination_site_id"
+        )
+
+        if (
+            not isinstance(destination_site_id, str)
+            or not destination_site_id
+        ):
+            raise ValueError(
+                "Flight Execution Record is missing destination_site_id."
+            )
+
+        destination_type = "destination Site"
+        endpoint = (
+            f"{DEFAULT_API_BASE_URL.rstrip('/')}"
+            f"/api/sites/{destination_site_id}"
+        )
+
+    try:
+        response = requests.get(
+            endpoint,
+            headers={
+                "Accept": "application/json",
+            },
+            timeout=DEFAULT_API_TIMEOUT_SECONDS,
+        )
+
+        response.raise_for_status()
+        destination = response.json()
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Could not retrieve the {destination_type}: {exc}"
+        ) from exc
+    except requests.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"The {destination_type} API returned invalid JSON."
+        ) from exc
+
+    operational_status = destination.get("operational_status")
+
+    if not isinstance(operational_status, str):
+        raise RuntimeError(
+            f"The {destination_type} API response is missing "
+            "operational_status."
+        )
+
+    is_operational = operational_status == "active"
+
+    return AssertionResult(
+        command=constants.NAV_ASSERT_ARRIVAL_IN_GEOMETRY,
+        passed=is_operational,
+        message=(
+            f"The {destination_type} is operational and available "
+            "for arrival."
+            if is_operational
+            else (
+                f"The {destination_type} is not operational and "
+                "is unavailable for arrival."
+            )
+        ),
+    )
 
 
 def assert_departure_time(
+    context: FlightProcessContext,
     assertion: dict[str, Any],
 ) -> AssertionResult:
-    """Confirm that the current time is inside the permitted launch window."""
+    """Confirm that preflight is inside the permitted launch window."""
+
+    if context.flight_execution is None:
+        raise ValueError(
+            "Flight process context is missing the Flight Execution Record."
+        )
 
     parameters = assertion.get("parameters")
 
@@ -439,9 +531,31 @@ def assert_departure_time(
             "Departure-time assertion is missing departure_time."
         )
 
+    operational_timezone = context.flight_execution.get(
+        "operational_timezone"
+    )
+
+    if (
+        not isinstance(operational_timezone, str)
+        or not operational_timezone
+    ):
+        raise ValueError(
+            "Flight Execution Record is missing operational_timezone."
+        )
+
+    try:
+        timezone_info = ZoneInfo(operational_timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(
+            "Flight Execution Record contains an invalid "
+            "operational_timezone."
+        ) from exc
+
     try:
         requested_departure = datetime.fromisoformat(
             f"{departure_date}T{departure_time}"
+        ).replace(
+            tzinfo=timezone_info
         )
     except ValueError as exc:
         raise ValueError(
@@ -456,7 +570,11 @@ def assert_departure_time(
         minutes=LAUNCH_WINDOW_EXPIRES_MINUTES,
     )
 
-    current_datetime = datetime.now().replace(microsecond=0)
+    current_datetime = datetime.now(
+        timezone_info
+    ).replace(
+        microsecond=0
+    )
 
     passed = (
         launch_window_opens
@@ -473,13 +591,13 @@ def assert_departure_time(
     elif current_datetime < launch_window_opens:
         message = (
             "Preflight began before the permitted launch window. "
-            f"The launch window opens at "
+            "The launch window opens at "
             f"{launch_window_opens.isoformat()}."
         )
     else:
         message = (
             "The permitted launch window has expired. "
-            f"The launch window expired at "
+            "The launch window expired at "
             f"{launch_window_expires.isoformat()}."
         )
 
@@ -493,9 +611,127 @@ def assert_departure_time(
 def assert_flight_band(
     assertion: dict[str, Any],
 ) -> AssertionResult:
-    """Confirm that the flight satisfies the compiled Flight Band."""
+    """
+    Confirm that a currently active Flight Band permits the flight.
 
-    raise NotImplementedError
+    Flight Band eligibility is evaluated using the current day and time
+    in the Flight Execution's operational timezone.
+    """
+
+    parameters = assertion.get("parameters")
+
+    if not isinstance(parameters, dict):
+        raise ValueError(
+            "Flight Band assertion is missing its parameters object."
+        )
+
+    flight_class = parameters.get("flight_class")
+    operational_timezone = parameters.get(
+        "operational_timezone"
+    )
+
+    if not isinstance(flight_class, str) or not flight_class:
+        raise ValueError(
+            "Flight Band assertion is missing flight_class."
+        )
+
+    if (
+        not isinstance(operational_timezone, str)
+        or not operational_timezone
+    ):
+        raise ValueError(
+            "Flight Band assertion is missing operational_timezone."
+        )
+
+    try:
+        timezone_info = ZoneInfo(operational_timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(
+            "Flight Band assertion contains an invalid "
+            "operational_timezone."
+        ) from exc
+
+    current_datetime = datetime.now(
+        timezone_info
+    )
+
+    # Flight Band days use Sunday=0 through Saturday=6.
+    current_day = (
+        current_datetime.weekday() + 1
+    ) % 7
+
+    current_time = current_datetime.time().replace(
+        second=0,
+        microsecond=0,
+        tzinfo=None,
+    )
+
+    flight_bands = load_flight_bands(
+        flight_class=flight_class,
+    )
+
+    for flight_band in flight_bands:
+        if not isinstance(flight_band, dict):
+            raise RuntimeError(
+                "The Flight Band API returned an invalid record."
+            )
+
+        days = flight_band.get("days")
+        start_time_value = flight_band.get("start_time")
+        end_time_value = flight_band.get("end_time")
+
+        if not isinstance(days, list):
+            raise RuntimeError(
+                "A Flight Band is missing its days array."
+            )
+
+        if current_day not in [
+            int(day)
+            for day in days
+        ]:
+            continue
+
+        if (
+            not isinstance(start_time_value, str)
+            or not isinstance(end_time_value, str)
+        ):
+            raise RuntimeError(
+                "A Flight Band is missing its operating times."
+            )
+
+        try:
+            start_time = datetime.strptime(
+                start_time_value,
+                "%H:%M",
+            ).time()
+
+            end_time = datetime.strptime(
+                end_time_value,
+                "%H:%M",
+            ).time()
+        except ValueError as exc:
+            raise RuntimeError(
+                "Flight Band times must use HH:MM format."
+            ) from exc
+
+        if start_time <= current_time <= end_time:
+            return AssertionResult(
+                command=constants.NAV_ASSERT_FLIGHT_BAND,
+                passed=True,
+                message=(
+                    "An active Flight Band permits this flight "
+                    "at the current operational day and time."
+                ),
+            )
+
+    return AssertionResult(
+        command=constants.NAV_ASSERT_FLIGHT_BAND,
+        passed=False,
+        message=(
+            "No active Flight Band permits this flight at the "
+            "current operational day and time."
+        ),
+    )
 
 
 def record_preflight_result(
