@@ -19,6 +19,7 @@ class FlightProcessContext:
 
     flight_execution_id: str
     flight_id: str
+    lifecycle_phase: str
     flight_execution: dict[str, Any] | None = None
     compiler_ir: dict[str, Any] | None = None
 

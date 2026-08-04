@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -86,6 +86,7 @@ def run_navproxy_process(
     context = FlightProcessContext(
         flight_execution_id=flight_execution_id,
         flight_id=flight_id,
+        lifecycle_phase="pre_flight",
         flight_execution=flight_execution,
         compiler_ir=compiler_ir,
     )
@@ -121,7 +122,17 @@ def run_navproxy_process(
 
     _start_flight(context)
 
+    context = replace(
+        context,
+        lifecycle_phase="in_flight",
+    )
+
     simulator.run_flight()
+
+    context = replace(
+        context,
+        lifecycle_phase="post_flight",
+    )
 
     flight_log_id = append_flight_log(
         context=context,
@@ -297,17 +308,30 @@ def execute_assertion(
     )
 
 
-def get_current_position() -> tuple[float, float]:
-    """
-    Temporary flight-controller stub.
+def get_current_position(
+    context: FlightProcessContext,
+) -> tuple[float, float]:
+    """Return the aircraft position appropriate to the flight stage."""
 
-    Returns the current aircraft position. During early NAVProxy
-    development this is hardcoded for integration testing.
-    """
+    if context.lifecycle_phase == "pre_flight":
+        return (
+            34.076687671,
+            -84.300904604,
+        )
 
-    return (
-        34.076687671,
-        -84.300904604,
+    if context.lifecycle_phase == "in_flight":
+        raise NotImplementedError(
+            "In-flight position retrieval is not implemented."
+        )
+
+    if context.lifecycle_phase == "post_flight":
+        return (
+            34.071570629,
+            -84.301660192,
+        )
+
+    raise ValueError(
+        f"Unknown flight lifecycle phase: {context.lifecycle_phase}"
     )
 
 
@@ -322,7 +346,7 @@ def assert_position_in_geometry(
             "Flight process context is missing the Flight Execution Record."
         )
 
-    latitude, longitude = get_current_position()
+    latitude, longitude = get_current_position(context)
 
     if isinstance(latitude, bool) or not isinstance(latitude, (int, float)):
         raise ValueError(
