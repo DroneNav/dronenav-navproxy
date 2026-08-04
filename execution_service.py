@@ -59,6 +59,14 @@ class PreflightResult:
     status: constants.PreflightStatus
     assertion_results: tuple[AssertionResult, ...]
 
+@dataclass(frozen=True)
+class PostflightResult:
+    """Combined result of all executed post-flight assertions."""
+
+    flight_execution_uuid: str
+    status: constants.PostflightStatus
+    assertion_results: tuple[AssertionResult, ...]
+
 
 def run_navproxy_process(
     flight_execution_id: str,
@@ -110,6 +118,11 @@ def run_navproxy_process(
     )
 
     if preflight_result.status != constants.PreflightStatus.PASSED:
+
+        release_flight_execution(
+            context.flight_execution_id,
+        )
+
         LOGGER.warning(
             "NAVProxy execution stopped during preflight: "
             "execution=%s flight=%s",
@@ -133,6 +146,32 @@ def run_navproxy_process(
         context,
         lifecycle_phase="post_flight",
     )
+
+    postflight_result = execute_postflight(
+        context
+    )
+
+    record_postflight_result(
+        context,
+        postflight_result,
+    )
+
+    if (
+        postflight_result.status
+        != constants.PostflightStatus.PASSED
+    ):
+        notify_flight_plan_status(
+            flight_execution_id=context.flight_execution_id,
+            status=FLIGHT_PLAN_STATUS_COMPLETED,
+        )
+
+        LOGGER.warning(
+            "NAVProxy execution stopped during post-flight: "
+            "execution=%s flight=%s",
+            context.flight_execution_id,
+            context.flight_id,
+        )
+        return
 
     flight_log_id = append_flight_log(
         context=context,
@@ -241,6 +280,47 @@ def execute_preflight(
     )
 
 
+def execute_postflight(
+    context: FlightProcessContext,
+) -> PostflightResult:
+    """Execute all post-flight assertions in compiler IR order."""
+
+    if context.flight_execution is None:
+        raise ValueError(
+            "Flight process context is missing the Flight Execution Record."
+        )
+
+    if context.compiler_ir is None:
+        raise ValueError(
+            "Flight process context is missing the compiler IR."
+        )
+
+    assertion_results: list[AssertionResult] = []
+
+    for assertion in get_postflight_assertions(
+        context.compiler_ir
+    ):
+        result = execute_assertion(
+            context,
+            assertion,
+        )
+
+        assertion_results.append(result)
+
+        if not result.passed:
+            return PostflightResult(
+                flight_execution_uuid=context.flight_execution_id,
+                status=constants.PostflightStatus.FAILED,
+                assertion_results=tuple(assertion_results),
+            )
+
+    return PostflightResult(
+        flight_execution_uuid=context.flight_execution_id,
+        status=constants.PostflightStatus.PASSED,
+        assertion_results=tuple(assertion_results),
+    )
+
+
 def get_preflight_assertions(
     compiler_ir: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -269,6 +349,35 @@ def get_preflight_assertions(
             )
 
         if command.get("command") in supported_preflight_commands:
+            assertions.append(command)
+
+    return assertions
+
+
+def get_postflight_assertions(
+    compiler_ir: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return executable post-flight assertions in sequence order."""
+
+    commands = compiler_ir.get("commands")
+
+    if not isinstance(commands, list):
+        raise ValueError(
+            "Compiler IR is missing the commands array."
+        )
+
+    assertions: list[dict[str, Any]] = []
+
+    for command in commands:
+        if not isinstance(command, dict):
+            raise ValueError(
+                "Each compiler IR command must be an object."
+            )
+
+        if (
+            command.get("command")
+            == constants.NAV_ASSERT_ARRIVAL_IN_GEOMETRY
+        ):
             assertions.append(command)
 
     return assertions
@@ -443,6 +552,12 @@ def assert_arrival_in_geometry(
             "Flight process context is missing the Flight Execution Record."
         )
 
+    if context.lifecycle_phase == "post_flight":
+        return assert_arrival_position_in_geometry(
+            context,
+            assertion,
+        )
+
     flight_execution = context.flight_execution
 
     arrival_droneport_id = flight_execution.get(
@@ -520,6 +635,80 @@ def assert_arrival_in_geometry(
                 f"The {destination_type} is not operational and "
                 "is unavailable for arrival."
             )
+        ),
+    )
+
+
+def assert_arrival_position_in_geometry(
+    context: FlightProcessContext,
+    assertion: dict[str, Any],
+) -> AssertionResult:
+    """Confirm that the aircraft landed inside its authorized arrival geometry."""
+
+    if context.flight_execution is None:
+        raise ValueError(
+            "Flight process context is missing the Flight Execution Record."
+        )
+
+    latitude, longitude = get_current_position(context)
+
+    if isinstance(latitude, bool) or not isinstance(latitude, (int, float)):
+        raise ValueError(
+            "Flight controller returned an invalid latitude."
+        )
+
+    if isinstance(longitude, bool) or not isinstance(longitude, (int, float)):
+        raise ValueError(
+            "Flight controller returned an invalid longitude."
+        )
+
+    flight_execution = context.flight_execution
+
+    arrival_droneport_id = flight_execution.get(
+        "arrival_droneport_id"
+    )
+
+    if arrival_droneport_id:
+        endpoint = (
+            f"{DEFAULT_API_BASE_URL.rstrip('/')}"
+            f"/api/droneports/{arrival_droneport_id}"
+            "/point-containment"
+        )
+    else:
+        destination_site_id = flight_execution.get(
+            "destination_site_id"
+        )
+
+        endpoint = (
+            f"{DEFAULT_API_BASE_URL.rstrip('/')}"
+            f"/api/sites/{destination_site_id}"
+            "/point-containment"
+        )
+
+    response = requests.post(
+        endpoint,
+        json={
+            "latitude": latitude,
+            "longitude": longitude,
+        },
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        timeout=DEFAULT_API_TIMEOUT_SECONDS,
+    )
+
+    response.raise_for_status()
+
+    inside = response.json()["inside"]
+
+    return AssertionResult(
+        command=constants.NAV_ASSERT_ARRIVAL_IN_GEOMETRY,
+        passed=inside,
+        message=(
+            "Aircraft landed inside the authorized arrival geometry."
+            if inside
+            else "Aircraft landed outside the authorized arrival geometry."
         ),
     )
 
@@ -824,4 +1013,87 @@ def record_preflight_result(
         context.flight_id,
         flight_log_id,
     )
+
+def record_postflight_result(
+    context: FlightProcessContext,
+    result: PostflightResult,
+) -> str:
+    """Append the final post-flight assertion result."""
+
+    passed = (
+        result.status
+        == constants.PostflightStatus.PASSED
+    )
+
+    failed_result = next(
+        (
+            assertion_result
+            for assertion_result in result.assertion_results
+            if not assertion_result.passed
+        ),
+        None,
+    )
+
+    details = {
+        "assertion_count": len(
+            result.assertion_results
+        ),
+    }
+
+    if failed_result is not None:
+        details.update({
+            "failed_command": failed_result.command,
+            "failure_message": failed_result.message,
+        })
+
+    flight_log_id = append_flight_log(
+        context=context,
+        lifecycle_phase="post_flight",
+        event_type=(
+            "postflight_completed"
+            if passed
+            else "postflight_failed"
+        ),
+        event_status=(
+            "completed"
+            if passed
+            else "failed"
+        ),
+        message=(
+            "Post-flight assertions completed successfully."
+            if passed
+            else failed_result.message
+        ),
+        details=details,
+    )
+
+    LOGGER.info(
+        "Post-flight %s: flight=%s log_entry=%s",
+        "completed" if passed else "failed",
+        context.flight_id,
+        flight_log_id,
+    )
+
+    return flight_log_id
+
+
+def release_flight_execution(
+    flight_execution_id: str,
+) -> None:
+    """Return a preflight-failed scheduled FER to active status."""
+
+    endpoint = (
+        f"{DEFAULT_API_BASE_URL.rstrip('/')}"
+        f"/api/flight-executions/{flight_execution_id}/release"
+    )
+
+    response = requests.post(
+        endpoint,
+        headers={
+            "Accept": "application/json",
+        },
+        timeout=DEFAULT_API_TIMEOUT_SECONDS,
+    )
+
+    response.raise_for_status()
 

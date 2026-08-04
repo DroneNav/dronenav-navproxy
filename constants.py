@@ -7,6 +7,9 @@ class PreflightStatus(StrEnum):
     PASSED = "passed"
     FAILED = "failed"
 
+class PostflightStatus(StrEnum):
+    PASSED = "passed"
+    FAILED = "failed"
 
 LIFECYCLE_PHASE_PREFLIGHT = "preflight"
 
