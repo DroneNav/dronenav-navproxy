@@ -37,7 +37,7 @@ from .tooling.fer_compiler import (
     load_and_compile_flight_execution,
     load_flight_bands,
 )
-
+from .flight_band_resolver import resolve_applicable_flight_band
 
 LOGGER = logging.getLogger(__name__)
 
@@ -104,10 +104,10 @@ def run_navproxy_process(
     )
 
     LOGGER.info(
-        "NAVProxy execution started: execution=%s flight=%s commands=%d",
+        "NAVProxy execution started: execution=%s flight=%s assertions=%d",
         context.flight_execution_id,
         context.flight_id,
-        len(compiler_ir.get("commands", [])),
+        len(compiler_ir.get("assertions", [])),
     )
 
     preflight_result = execute_preflight(context)
@@ -326,11 +326,11 @@ def get_preflight_assertions(
 ) -> list[dict[str, Any]]:
     """Return executable preflight assertions in compiler sequence order."""
 
-    commands = compiler_ir.get("commands")
+    compiler_assertions = compiler_ir.get("assertions")
 
-    if not isinstance(commands, list):
+    if not isinstance(compiler_assertions, list):
         raise ValueError(
-            "Compiler IR is missing the commands array."
+            "Compiler IR is missing the assertions array."
         )
 
     supported_preflight_commands = {
@@ -342,14 +342,14 @@ def get_preflight_assertions(
 
     assertions: list[dict[str, Any]] = []
 
-    for command in commands:
-        if not isinstance(command, dict):
+    for assertion in compiler_assertions:
+        if not isinstance(assertion, dict):
             raise ValueError(
-                "Each compiler IR command must be an object."
+                "Each compiler IR assertion must be an object."
             )
 
-        if command.get("command") in supported_preflight_commands:
-            assertions.append(command)
+        if assertion.get("assertion_type") in supported_preflight_commands:
+            assertions.append(assertion)
 
     return assertions
 
@@ -359,26 +359,26 @@ def get_postflight_assertions(
 ) -> list[dict[str, Any]]:
     """Return executable post-flight assertions in sequence order."""
 
-    commands = compiler_ir.get("commands")
+    compiler_assertions = compiler_ir.get("assertions")
 
     if not isinstance(commands, list):
         raise ValueError(
-            "Compiler IR is missing the commands array."
+            "Compiler IR is missing the assertions array."
         )
 
     assertions: list[dict[str, Any]] = []
 
-    for command in commands:
-        if not isinstance(command, dict):
+    for assertion in compiler_assertions:
+        if not isinstance(assertion, dict):
             raise ValueError(
-                "Each compiler IR command must be an object."
+                "Each compiler IR assertion must be an object."
             )
 
         if (
-            command.get("command")
+            assertion.get("assertion_type")
             == constants.NAV_ASSERT_ARRIVAL_IN_GEOMETRY
         ):
-            assertions.append(command)
+            assertions.append(assertion)
 
     return assertions
 
@@ -389,7 +389,7 @@ def execute_assertion(
 ) -> AssertionResult:
     """Dispatch one assertion to its implementation procedure."""
 
-    command = assertion.get("command")
+    command = assertion.get("assertion_type")
 
     if command == constants.NAV_ASSERT_POSITION_IN_GEOMETRY:
         return assert_position_in_geometry(
@@ -883,59 +883,22 @@ def assert_flight_band(
         flight_class=flight_class,
     )
 
-    for flight_band in flight_bands:
-        if not isinstance(flight_band, dict):
-            raise RuntimeError(
-                "The Flight Band API returned an invalid record."
-            )
+    applicable_flight_band = resolve_applicable_flight_band(
+        flight_bands=flight_bands,
+        operational_timezone=operational_timezone,
+        current_datetime=current_datetime,
+    )
 
-        days = flight_band.get("days")
-        start_time_value = flight_band.get("start_time")
-        end_time_value = flight_band.get("end_time")
+    if applicable_flight_band is not None:
+        return AssertionResult(
+            command=constants.NAV_ASSERT_FLIGHT_BAND,
+            passed=True,
+            message=(
+                "An active Flight Band permits this flight "
+                "at the current operational day and time."
+            ),
+        )
 
-        if not isinstance(days, list):
-            raise RuntimeError(
-                "A Flight Band is missing its days array."
-            )
-
-        if current_day not in [
-            int(day)
-            for day in days
-        ]:
-            continue
-
-        if (
-            not isinstance(start_time_value, str)
-            or not isinstance(end_time_value, str)
-        ):
-            raise RuntimeError(
-                "A Flight Band is missing its operating times."
-            )
-
-        try:
-            start_time = datetime.strptime(
-                start_time_value,
-                "%H:%M",
-            ).time()
-
-            end_time = datetime.strptime(
-                end_time_value,
-                "%H:%M",
-            ).time()
-        except ValueError as exc:
-            raise RuntimeError(
-                "Flight Band times must use HH:MM format."
-            ) from exc
-
-        if start_time <= current_time <= end_time:
-            return AssertionResult(
-                command=constants.NAV_ASSERT_FLIGHT_BAND,
-                passed=True,
-                message=(
-                    "An active Flight Band permits this flight "
-                    "at the current operational day and time."
-                ),
-            )
 
     return AssertionResult(
         command=constants.NAV_ASSERT_FLIGHT_BAND,

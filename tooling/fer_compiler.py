@@ -32,6 +32,8 @@ from app.config.constants import (
     DEFAULT_API_TIMEOUT_SECONDS,
 )
 
+from app.navproxy.flight_band_resolver import resolve_applicable_flight_band
+
 
 class FlightExecutionCompileError(ValueError):
     """Raised when a Flight Execution Record cannot be interpreted."""
@@ -235,7 +237,7 @@ def build_launch_position_assertion(
             )
 
         return {
-            "command": "NAV_ASSERT_POSITION_IN_GEOMETRY",
+            "assertion_type": "NAV_ASSERT_POSITION_IN_GEOMETRY",
             "parameters": {
                 "geometry_type": "circle",
                 "coordinate": geometry["coordinates"],
@@ -265,7 +267,7 @@ def build_launch_position_assertion(
         )
 
     return {
-        "command": "NAV_ASSERT_POSITION_IN_GEOMETRY",
+        "assertion_type": "NAV_ASSERT_POSITION_IN_GEOMETRY",
         "parameters": {
             "geometry_type": "polygon",
             "coordinates": geometry["coordinates"],
@@ -321,7 +323,7 @@ def build_arrival_position_assertion(
             )
 
         return {
-            "command": "NAV_ASSERT_ARRIVAL_IN_GEOMETRY",
+            "assertion_type": "NAV_ASSERT_ARRIVAL_IN_GEOMETRY",
             "parameters": {
                 "geometry_type": "circle",
                 "coordinate": geometry["coordinates"],
@@ -356,7 +358,7 @@ def build_arrival_position_assertion(
         )
 
     return {
-        "command": "NAV_ASSERT_ARRIVAL_IN_GEOMETRY",
+        "assertion_type": "NAV_ASSERT_ARRIVAL_IN_GEOMETRY",
         "parameters": {
             "geometry_type": "polygon",
             "coordinates": geometry["coordinates"],
@@ -425,7 +427,7 @@ def build_departure_time_assertion(
     local_departure = local_departure.replace(microsecond=0)
 
     return {
-        "command": "NAV_ASSERT_DEPARTURE_TIME",
+        "assertion_type": "NAV_ASSERT_DEPARTURE_TIME",
         "parameters": {
             "departure_date": local_departure.date().isoformat(),
             "departure_time": local_departure.time().isoformat(),
@@ -449,7 +451,7 @@ def build_flight_band_assertion(
         return None
 
     return {
-        "command": "NAV_ASSERT_FLIGHT_BAND",
+        "assertion_type": "NAV_ASSERT_FLIGHT_BAND",
         "parameters": {
             "flight_class": flight_execution["flight_class"],
             "operational_timezone": (
@@ -487,7 +489,7 @@ def build_route_assertions(
 
         assertions.append(
             {
-                "command": "NAV_ASSERT_ROUTE",
+                "assertion_type": "NAV_ASSERT_ROUTE",
                 "parameters": {
                     "geometry_type": "linestring",
                     "coordinates": geometry["coordinates"],
@@ -496,6 +498,204 @@ def build_route_assertions(
         )
 
     return assertions
+
+
+def build_route_waypoint_coordinates(
+    route_assertions: list[dict[str, Any]],
+) -> list[list[float]]:
+    """
+    Expand ordered Route assertions into one continuous waypoint path.
+
+    The first Route contributes every coordinate. Each subsequent Route
+    must begin at the preceding Route's final coordinate; that duplicated
+    boundary coordinate is emitted only once.
+    """
+
+    waypoint_coordinates: list[list[float]] = []
+    previous_route_endpoint: list[float] | None = None
+
+    for route_index, route_assertion in enumerate(route_assertions):
+        if not isinstance(route_assertion, dict):
+            raise FlightExecutionCompileError(
+                "Each Route assertion must be a JSON object."
+            )
+
+        if (
+            route_assertion.get("assertion_type")
+            != "NAV_ASSERT_ROUTE"
+        ):
+            raise FlightExecutionCompileError(
+                "Route waypoint compilation received a non-Route assertion."
+            )
+
+        parameters = route_assertion.get("parameters")
+
+        if not isinstance(parameters, dict):
+            raise FlightExecutionCompileError(
+                "Route assertion is missing its parameters object."
+            )
+
+        coordinates = parameters.get("coordinates")
+
+        if not isinstance(coordinates, list) or len(coordinates) < 2:
+            raise FlightExecutionCompileError(
+                "Each Route must contain at least two coordinates."
+            )
+
+        route_coordinates: list[list[float]] = []
+
+        for coordinate in coordinates:
+            if (
+                not isinstance(coordinate, list)
+                or len(coordinate) < 2
+                or isinstance(coordinate[0], bool)
+                or not isinstance(coordinate[0], (int, float))
+                or isinstance(coordinate[1], bool)
+                or not isinstance(coordinate[1], (int, float))
+            ):
+                raise FlightExecutionCompileError(
+                    "Each Route coordinate must contain numeric "
+                    "longitude and latitude values."
+                )
+
+            route_coordinates.append([
+                coordinate[0],
+                coordinate[1],
+            ])
+
+        if route_index == 0:
+            waypoint_coordinates.extend(route_coordinates)
+        else:
+            if route_coordinates[0] != previous_route_endpoint:
+                raise FlightExecutionCompileError(
+                    "Ordered Routes are not contiguous. The first "
+                    "coordinate of each Route must equal the final "
+                    "coordinate of the preceding Route."
+                )
+
+            waypoint_coordinates.extend(route_coordinates[1:])
+
+        previous_route_endpoint = route_coordinates[-1]
+
+    return waypoint_coordinates
+
+
+def resolve_mission_minimum_agl_ft(
+    flight_execution: dict[str, Any],
+) -> int | float:
+    """
+    Resolve the Phase 2 mission altitude from the single applicable
+    Flight Band.
+    """
+
+    flight_class = flight_execution.get("flight_class")
+    operational_timezone = flight_execution.get(
+        "operational_timezone"
+    )
+
+    if not isinstance(flight_class, str) or not flight_class:
+        raise FlightExecutionCompileError(
+            "Flight Execution Record is missing flight_class."
+        )
+
+    if (
+        not isinstance(operational_timezone, str)
+        or not operational_timezone
+    ):
+        raise FlightExecutionCompileError(
+            "Flight Execution Record is missing operational_timezone."
+        )
+
+    flight_bands = load_flight_bands(
+        flight_class=flight_class,
+    )
+
+    applicable_flight_band = resolve_applicable_flight_band(
+        flight_bands=flight_bands,
+        operational_timezone=operational_timezone,
+    )
+
+    if applicable_flight_band is None:
+        raise FlightExecutionCompileError(
+            "No active Flight Band permits mission compilation."
+        )
+
+    minimum_agl_ft = applicable_flight_band.get("min_agl_ft")
+
+    if (
+        isinstance(minimum_agl_ft, bool)
+        or not isinstance(minimum_agl_ft, (int, float))
+        or minimum_agl_ft <= 0
+    ):
+        raise FlightExecutionCompileError(
+            "Applicable Flight Band is missing a valid min_agl_ft."
+        )
+
+    return minimum_agl_ft
+
+
+def build_mission_items(
+    waypoint_coordinates: list[list[float]],
+    minimum_agl_ft: int | float,
+    arrival_assertion: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build the ordered DroneNav mission stream."""
+
+    if not waypoint_coordinates:
+        return []
+
+    if (
+        isinstance(minimum_agl_ft, bool)
+        or not isinstance(minimum_agl_ft, (int, float))
+        or minimum_agl_ft <= 0
+    ):
+        raise FlightExecutionCompileError(
+            "Mission minimum_agl_ft must be a positive number."
+        )
+
+    parameters = arrival_assertion.get("parameters")
+
+    if not isinstance(parameters, dict):
+        raise FlightExecutionCompileError(
+            "Arrival assertion is missing its parameters object."
+        )
+
+    arrival_coordinate = parameters.get("coordinate")
+
+    if (
+        not isinstance(arrival_coordinate, list)
+        or len(arrival_coordinate) < 2
+    ):
+        raise FlightExecutionCompileError(
+            "Scheduled corridor flight requires an arrival coordinate."
+        )
+
+    mission_items: list[dict[str, Any]] = [
+        {
+            "sequence": 0,
+            "mission_type": "TAKEOFF",
+            "altitude_agl_ft": minimum_agl_ft,
+        }
+    ]
+
+    for coordinate in waypoint_coordinates:
+        mission_items.append({
+            "sequence": len(mission_items),
+            "mission_type": "WAYPOINT",
+            "coordinate": coordinate,
+            "altitude_agl_ft": minimum_agl_ft,
+        })
+
+    mission_items.append({
+        "sequence": len(mission_items),
+        "mission_type": "LAND",
+        "coordinate": [
+            arrival_coordinate[0],
+            arrival_coordinate[1],
+        ],
+    })
+
+    return mission_items
 
 
 def interpret_flight_execution(
@@ -519,14 +719,14 @@ def interpret_flight_execution(
             "flight_execution is missing flight_execution_id."
         )
 
-    commands: list[dict[str, Any]] = []
+    assertions: list[dict[str, Any]] = []
 
     launch_assertion = build_launch_position_assertion(
         flight_execution=flight_execution,
     )
 
-    commands.append({
-        "sequence": len(commands),
+    assertions.append({
+        "sequence": len(assertions),
         **launch_assertion,
     })
 
@@ -535,8 +735,8 @@ def interpret_flight_execution(
     )
 
     if departure_assertion is not None:
-        commands.append({
-            "sequence": len(commands),
+        assertions.append({
+            "sequence": len(assertions),
             **departure_assertion,
         })
 
@@ -545,8 +745,8 @@ def interpret_flight_execution(
     )
 
     if flight_band_assertion is not None:
-        commands.append({
-            "sequence": len(commands),
+        assertions.append({
+            "sequence": len(assertions),
             **flight_band_assertion,
         })
 
@@ -554,8 +754,8 @@ def interpret_flight_execution(
         flight_execution=flight_execution,
     )
 
-    commands.append({
-        "sequence": len(commands),
+    assertions.append({
+        "sequence": len(assertions),
         **arrival_assertion,
     })
 
@@ -564,14 +764,31 @@ def interpret_flight_execution(
     )
 
     for route_assertion in route_assertions:
-        commands.append({
-                "sequence": len(commands),
+        assertions.append({
+                "sequence": len(assertions),
                 **route_assertion,
         })
 
+    waypoint_coordinates = build_route_waypoint_coordinates(
+        route_assertions
+    )
+
+    minimum_agl_ft = resolve_mission_minimum_agl_ft(
+        flight_execution
+    )
+
+    mission_items = build_mission_items(
+        waypoint_coordinates=waypoint_coordinates,
+        minimum_agl_ft=minimum_agl_ft,
+        arrival_assertion=arrival_assertion,
+    )
+
     return {
         "flight_execution_id": flight_execution_id,
-        "commands": commands,
+        "assertions": assertions,
+        "mission": {
+            "mission_items": mission_items,
+        },
     }
 
 
@@ -673,11 +890,11 @@ def main() -> int:
                 "Input JSON is missing the flight_execution object."
             )
 
-        command_stream = compile_flight_execution(
+        assertion_stream = compile_flight_execution(
             flight_execution=flight_execution,
         )
 
-        json.dump(command_stream, sys.stdout, indent=2)
+        json.dump(assertion_stream, sys.stdout, indent=2)
         sys.stdout.write("\n")
 
         return 0
