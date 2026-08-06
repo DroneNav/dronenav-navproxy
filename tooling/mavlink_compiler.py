@@ -15,7 +15,7 @@ from typing import Any
 
 import yaml
 
-from tooling.compile_command import compile_command
+from app.navproxy.tooling.compile_command import compile_command
 
 
 class CommandStreamCompilationError(ValueError):
@@ -78,12 +78,24 @@ def compile_mavlink_command_stream(
 ) -> dict[str, Any]:
     """Compile every command in an ordered declarative command stream."""
 
-    flight_execution = command_stream.get("flight_execution")
-    commands = command_stream.get("commands")
+    flight_execution_id = command_stream.get(
+        "flight_execution_id"
+    )
+    mission = command_stream.get("mission")
 
-    if not isinstance(flight_execution, dict):
+    if not isinstance(mission, dict):
         raise CommandStreamCompilationError(
-            "The command stream must contain a 'flight_execution' object."
+            "The compiler output must contain a 'mission' object."
+        )
+
+    commands = mission.get("mission_items")
+
+    if (
+        not isinstance(flight_execution_id, str)
+        or not flight_execution_id
+    ):
+        raise CommandStreamCompilationError(
+            "The compiler output must contain flight_execution_id."
         )
 
     if not isinstance(commands, list):
@@ -110,7 +122,7 @@ def compile_mavlink_command_stream(
         compiled_commands.append(compiled_command)
 
     return {
-        "flight_execution": flight_execution,
+        "flight_execution_id": flight_execution_id,
         "protocol": metadata.get("protocol"),
         "platform": metadata.get("platform"),
         "command_count": len(compiled_commands),

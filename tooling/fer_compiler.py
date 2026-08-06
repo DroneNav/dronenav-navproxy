@@ -673,26 +673,34 @@ def build_mission_items(
     mission_items: list[dict[str, Any]] = [
         {
             "sequence": 0,
-            "mission_type": "TAKEOFF",
-            "altitude_agl_ft": minimum_agl_ft,
+            "command": "MAV_CMD_NAV_TAKEOFF",
+            "parameters": {
+                "latitude": 0,
+                "longitude": 0,
+                "altitude_meters": minimum_agl_ft * 0.3048,
+            },
         }
     ]
 
     for coordinate in waypoint_coordinates:
         mission_items.append({
             "sequence": len(mission_items),
-            "mission_type": "WAYPOINT",
-            "coordinate": coordinate,
-            "altitude_agl_ft": minimum_agl_ft,
+            "command": "MAV_CMD_NAV_WAYPOINT",
+            "parameters": {
+                "latitude": coordinate[1],
+                "longitude": coordinate[0],
+                "altitude_meters": minimum_agl_ft * 0.3048,
+            },
         })
 
     mission_items.append({
         "sequence": len(mission_items),
-        "mission_type": "LAND",
-        "coordinate": [
-            arrival_coordinate[0],
-            arrival_coordinate[1],
-        ],
+        "command": "MAV_CMD_NAV_LAND",
+        "parameters": {
+            "latitude": arrival_coordinate[1],
+            "longitude": arrival_coordinate[0],
+            "altitude_meters": 0,
+        },
     })
 
     return mission_items

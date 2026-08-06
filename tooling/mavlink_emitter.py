@@ -26,8 +26,8 @@ from typing import Any
 
 import yaml
 
-from tooling.mavlink_compiler import compile_mavlink_command_stream
-from tooling.emit_mission_item_int import emit_mission_item_int
+from app.navproxy.tooling.mavlink_compiler import compile_mavlink_command_stream
+from app.navproxy.tooling.emit_mission_item_int import emit_mission_item_int
 
 
 class MissionStreamEmissionError(ValueError):

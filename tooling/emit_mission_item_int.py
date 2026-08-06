@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from tooling.compile_command import (
+from app.navproxy.tooling.compile_command import (
     CommandMetadataError,
     CommandValidationError,
     compile_command,
