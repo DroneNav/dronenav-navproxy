@@ -487,12 +487,15 @@ def build_route_assertions(
             "Route",
         )
 
+        segment_attributes = route.get("segment_attributes")
+
         assertions.append(
             {
                 "assertion_type": "NAV_ASSERT_ROUTE",
                 "parameters": {
                     "geometry_type": "linestring",
                     "coordinates": geometry["coordinates"],
+                    "segment_attributes": segment_attributes,
                 },
             }
         )
@@ -579,12 +582,11 @@ def build_route_waypoint_coordinates(
 
     return waypoint_coordinates
 
-
-def resolve_mission_minimum_agl_ft(
+def resolve_mission_altitude_band(
     flight_execution: dict[str, Any],
-) -> int | float:
+) -> tuple[int | float, int | float]:
     """
-    Resolve the Phase 2 mission altitude from the single applicable
+    Resolve the Phase 2 mission altitude band from the single applicable
     Flight Band.
     """
 
@@ -621,6 +623,7 @@ def resolve_mission_minimum_agl_ft(
         )
 
     minimum_agl_ft = applicable_flight_band.get("min_agl_ft")
+    maximum_agl_ft = applicable_flight_band.get("max_agl_ft")
 
     if (
         isinstance(minimum_agl_ft, bool)
@@ -631,7 +634,16 @@ def resolve_mission_minimum_agl_ft(
             "Applicable Flight Band is missing a valid min_agl_ft."
         )
 
-    return minimum_agl_ft
+    if (
+        isinstance(maximum_agl_ft, bool)
+        or not isinstance(maximum_agl_ft, (int, float))
+        or maximum_agl_ft <= minimum_agl_ft
+    ):
+        raise FlightExecutionCompileError(
+            "Applicable Flight Band is missing a valid max_agl_ft."
+        )
+
+    return minimum_agl_ft, maximum_agl_ft
 
 
 def build_mission_items(
@@ -704,6 +716,32 @@ def build_mission_items(
     })
 
     return mission_items
+
+
+def build_route_conformance_segments(
+    route_assertions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build ordered Route segments for in-flight conformance evaluation."""
+
+    conformance_segments: list[dict[str, Any]] = []
+
+    for route_assertion in route_assertions:
+        parameters = route_assertion["parameters"]
+        coordinates = parameters["coordinates"]
+        segment_attributes = parameters["segment_attributes"]
+
+        for segment_index in range(len(coordinates) - 1):
+            start_coordinate = coordinates[segment_index]
+            end_coordinate = coordinates[segment_index + 1]
+            attributes = segment_attributes[segment_index]
+
+            conformance_segments.append({
+                "start_coordinate": start_coordinate,
+                "end_coordinate": end_coordinate,
+                "route_width_ft": attributes["route_width_ft"],
+            })
+
+    return conformance_segments
 
 
 def interpret_flight_execution(
@@ -781,7 +819,11 @@ def interpret_flight_execution(
         route_assertions
     )
 
-    minimum_agl_ft = resolve_mission_minimum_agl_ft(
+    route_conformance_segments = build_route_conformance_segments(
+        route_assertions
+    )
+
+    minimum_agl_ft, maximum_agl_ft = resolve_mission_altitude_band(
         flight_execution
     )
 
@@ -795,6 +837,9 @@ def interpret_flight_execution(
         "flight_execution_id": flight_execution_id,
         "assertions": assertions,
         "mission": {
+            "minimum_agl_ft": minimum_agl_ft,
+            "maximum_agl_ft": maximum_agl_ft,
+            "route_conformance_segments": route_conformance_segments,
             "mission_items": mission_items,
         },
     }

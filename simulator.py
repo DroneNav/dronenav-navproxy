@@ -30,12 +30,23 @@ class FlightSimulator:
         self.preflight_seconds = preflight_seconds
         self.flight_seconds = flight_seconds
 
+
     def run_preflight(self) -> None:
         LOGGER.info(
             "Pre-flight checks in progress for %s second(s).",
             self.preflight_seconds,
         )
         time.sleep(self.preflight_seconds)
+
+
+    def run_flight(
+        self,
+        compiler_ir: dict[str, Any],
+    ) -> Iterator[TelemetryReading]:
+        """Run the simulated flight and yield telemetry readings."""
+
+        yield from self.iter_telemetry(compiler_ir)
+
 
     def iter_telemetry(
         self,
@@ -63,11 +74,141 @@ class FlightSimulator:
                 "Compiler IR mission is missing the mission_items array."
             )
 
-
-    def run_flight(self) -> None:
-        LOGGER.info(
-            "Aircraft is in flight for %s second(s).",
-            self.flight_seconds,
+        launch_assertion = next(
+            (
+                assertion
+                for assertion in assertions
+                if isinstance(assertion, dict)
+                and assertion.get("assertion_type")
+                == "NAV_ASSERT_POSITION_IN_GEOMETRY"
+            ),
+            None,
         )
-        time.sleep(self.flight_seconds)
+
+        if launch_assertion is None:
+            raise ValueError(
+                "Compiler IR is missing the launch position assertion."
+            )
+
+        launch_parameters = launch_assertion.get("parameters")
+
+        if not isinstance(launch_parameters, dict):
+            raise ValueError(
+                "Launch position assertion is missing its parameters object."
+            )
+
+        launch_coordinate = launch_parameters.get("coordinate")
+
+        if (
+            not isinstance(launch_coordinate, list)
+            or len(launch_coordinate) < 2
+        ):
+            raise ValueError(
+                "Launch position assertion is missing its coordinate."
+            )
+
+        launch_longitude = launch_coordinate[0]
+        launch_latitude = launch_coordinate[1]
+
+        yield TelemetryReading(
+            latitude=launch_latitude,
+            longitude=launch_longitude,
+            relative_altitude_ft=0.0,
+            armed=False,
+            heartbeat_active=True,
+        )
+
+        for mission_item in mission_items:
+            if not isinstance(mission_item, dict):
+                continue
+
+            if mission_item.get("command") != "MAV_CMD_NAV_TAKEOFF":
+                continue
+
+            parameters = mission_item.get("parameters")
+
+            if not isinstance(parameters, dict):
+                continue
+
+            altitude_meters = parameters.get("altitude_meters")
+
+            if not isinstance(altitude_meters, (int, float)):
+                continue
+
+            yield TelemetryReading(
+                latitude=launch_latitude,
+                longitude=launch_longitude,
+                relative_altitude_ft=altitude_meters / 0.3048,
+                armed=True,
+                heartbeat_active=True,
+                mission_sequence=mission_item.get("sequence"),
+            )
+
+            break
+
+        for mission_item in mission_items:
+            if not isinstance(mission_item, dict):
+                continue
+
+            if mission_item.get("command") != "MAV_CMD_NAV_WAYPOINT":
+                continue
+
+            parameters = mission_item.get("parameters")
+
+            if not isinstance(parameters, dict):
+                continue
+
+            latitude = parameters.get("latitude")
+            longitude = parameters.get("longitude")
+            altitude_meters = parameters.get("altitude_meters")
+
+            if (
+                not isinstance(latitude, (int, float))
+                or not isinstance(longitude, (int, float))
+                or not isinstance(altitude_meters, (int, float))
+            ):
+                continue
+
+            yield TelemetryReading(
+                latitude=latitude,
+                longitude=longitude,
+                relative_altitude_ft=altitude_meters / 0.3048,
+                armed=True,
+                heartbeat_active=True,
+                mission_sequence=mission_item.get("sequence"),
+            )
+
+        for mission_item in mission_items:
+            if not isinstance(mission_item, dict):
+                continue
+
+            if mission_item.get("command") != "MAV_CMD_NAV_LAND":
+                continue
+
+            parameters = mission_item.get("parameters")
+
+            if not isinstance(parameters, dict):
+                continue
+
+            latitude = parameters.get("latitude")
+            longitude = parameters.get("longitude")
+
+            if (
+                not isinstance(latitude, (int, float))
+                or not isinstance(longitude, (int, float))
+            ):
+                continue
+
+            yield TelemetryReading(
+                latitude=latitude,
+                longitude=longitude,
+                relative_altitude_ft=0.0,
+                armed=True,
+                heartbeat_active=True,
+                mission_sequence=mission_item.get("sequence"),
+            )
+
+            break
+
+
 

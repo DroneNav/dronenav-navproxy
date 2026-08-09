@@ -32,7 +32,7 @@ from .settings import (
     FLIGHT_PLAN_STATUS_COMPLETED,
     FLIGHT_PLAN_STATUS_SUBMITTED,
 )
-from .simulator import FlightSimulator
+from .simulator import FlightSimulator, TelemetryReading
 from .tooling.fer_compiler import (
     load_and_compile_flight_execution,
     load_flight_bands,
@@ -140,7 +140,37 @@ def run_navproxy_process(
         lifecycle_phase="in_flight",
     )
 
-    simulator.run_flight()
+    for telemetry in simulator.run_flight(context.compiler_ir):
+        LOGGER.info(
+            "Telemetry: lat=%s lon=%s alt_ft=%s armed=%s heartbeat=%s sequence=%s",
+            telemetry.latitude,
+            telemetry.longitude,
+            telemetry.relative_altitude_ft,
+            telemetry.armed,
+            telemetry.heartbeat_active,
+            telemetry.mission_sequence,
+        )
+
+        if telemetry.mission_sequence is not None:
+            segment = get_route_conformance_segment(
+                context.compiler_ir,
+                telemetry.mission_sequence,
+            )
+
+        if segment is not None:
+            conformance = evaluate_route_conformance(
+                telemetry,
+                segment,
+            )
+
+        if not conformance["inside"]:
+            LOGGER.warning(
+                "Route conformance violation: "
+                "distance_ft=%s half_width_ft=%s sequence=%s",
+                conformance["distance_ft"],
+                conformance["half_width_ft"],
+                telemetry.mission_sequence,
+            )
 
     context = replace(
         context,
@@ -239,6 +269,85 @@ def _validate_wait_seconds(name: str, value: Any) -> int:
         raise ValueError(f"{name} must not be negative.")
 
     return normalized_value
+
+
+def get_route_conformance_segment(
+    compiler_ir: dict[str, Any],
+    mission_sequence: int,
+) -> dict[str, Any] | None:
+    """Return the Route conformance segment for a mission sequence."""
+
+    mission = compiler_ir.get("mission")
+
+    if not isinstance(mission, dict):
+        return None
+
+    conformance_segments = mission.get(
+        "route_conformance_segments"
+    )
+
+    if not isinstance(conformance_segments, list):
+        return None
+
+    segment_index = mission_sequence - 2
+
+    if segment_index < 0:
+        return None
+
+    if segment_index >= len(conformance_segments):
+        return None
+ 
+    return conformance_segments[segment_index]
+
+
+def evaluate_route_conformance(
+    telemetry: TelemetryReading,
+    segment: dict[str, Any],
+) -> dict[str, Any]:
+    """Evaluate one telemetry position against one Route segment."""
+
+    start_coordinate = segment["start_coordinate"]
+    end_coordinate = segment["end_coordinate"]
+    route_width_ft = segment["route_width_ft"]
+
+    endpoint = (
+        f"{DEFAULT_API_BASE_URL.rstrip('/')}"
+        f"/api/routes/segment-conformance"
+    )
+
+    try:
+        response = requests.post(
+            endpoint,
+            json={
+                "latitude": telemetry.latitude,
+                "longitude": telemetry.longitude,
+                "start_latitude": start_coordinate[1],
+                "start_longitude": start_coordinate[0],
+                "end_latitude": end_coordinate[1],
+                "end_longitude": end_coordinate[0],
+                "route_width_ft": route_width_ft,
+            },
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            timeout=DEFAULT_API_TIMEOUT_SECONDS,
+        )
+
+        response.raise_for_status()
+        result = response.json()
+
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Could not evaluate Route conformance: {exc}"
+        ) from exc
+
+    except requests.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Route conformance API returned invalid JSON."
+        ) from exc
+
+    return result
 
 
 def execute_preflight(
