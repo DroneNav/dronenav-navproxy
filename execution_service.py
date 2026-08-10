@@ -151,6 +151,8 @@ def run_navproxy_process(
             telemetry.mission_sequence,
         )
 
+        segment = None
+
         if telemetry.mission_sequence is not None:
             segment = get_route_conformance_segment(
                 context.compiler_ir,
@@ -163,14 +165,73 @@ def run_navproxy_process(
                 segment,
             )
 
-        if not conformance["inside"]:
-            LOGGER.warning(
-                "Route conformance violation: "
-                "distance_ft=%s half_width_ft=%s sequence=%s",
-                conformance["distance_ft"],
-                conformance["half_width_ft"],
-                telemetry.mission_sequence,
+            if not conformance["inside"]:
+                LOGGER.warning(
+                    "Route conformance violation: "
+                    "centerline_offset_ft=%s allowed_offset_ft=%s sequence=%s",
+                    conformance["distance_ft"],
+                    conformance["half_width_ft"],
+                    telemetry.mission_sequence,
+                )
+                append_flight_log(
+                    context=context,
+                    lifecycle_phase="in_flight",
+                    event_type="Route Deviation",
+                    event_status="Violation",
+                    message="Aircraft moved outside the authorized flight route.",
+                    details={
+                        "centerline_offset_ft": conformance["distance_ft"],
+                        "allowed_offset_ft": conformance["half_width_ft"],
+                        "latitude": telemetry.latitude,
+                        "longitude": telemetry.longitude,
+                    },
+                )
+
+        if (
+            segment is not None
+            and segment["segment_index"] > 0
+            and segment["segment_index"]
+            < len(
+                context.compiler_ir["mission"]["route_conformance_segments"]
+            ) - 1
+        ):
+            vertical_conformance = evaluate_vertical_conformance(
+                context.compiler_ir,
+                telemetry,
             )
+
+            if not vertical_conformance:
+                LOGGER.warning(
+                    "Vertical conformance violation: "
+                    "altitude_ft=%s minimum_agl_ft=%s maximum_agl_ft=%s "
+                    "sequence=%s lat=%s lon=%s",
+                    telemetry.relative_altitude_ft,
+                    context.compiler_ir["mission"]["minimum_agl_ft"],
+                    context.compiler_ir["mission"]["maximum_agl_ft"],
+                    telemetry.mission_sequence,
+                    telemetry.latitude,
+                    telemetry.longitude,
+                )
+                append_flight_log(
+                    context=context,
+                    lifecycle_phase="in_flight",
+                    event_type="Altitude Deviation",
+                    event_status="Violation",
+                    message="Aircraft moved outside the authorized altitude range.",
+                    details={
+                        "aircraft_altitude_ft": telemetry.relative_altitude_ft,
+                        "minimum_altitude_ft": (
+                            context.compiler_ir["mission"]["minimum_agl_ft"]
+                        ),
+                        "maximum_altitude_ft": (
+                            context.compiler_ir["mission"]["maximum_agl_ft"]
+                        ),
+                        "latitude": telemetry.latitude,
+                        "longitude": telemetry.longitude,
+                    },
+                )
+
+
 
     context = replace(
         context,
@@ -297,7 +358,10 @@ def get_route_conformance_segment(
     if segment_index >= len(conformance_segments):
         return None
  
-    return conformance_segments[segment_index]
+    return {
+        "segment_index": segment_index,
+        **conformance_segments[segment_index],
+    }
 
 
 def evaluate_route_conformance(
@@ -348,6 +412,29 @@ def evaluate_route_conformance(
         ) from exc
 
     return result
+
+
+def evaluate_vertical_conformance(
+    compiler_ir: dict[str, Any],
+    telemetry: TelemetryReading,
+) -> bool:
+    """Evaluate one telemetry altitude against the Flight Band."""
+
+    mission = compiler_ir.get("mission")
+
+    if not isinstance(mission, dict):
+        return False
+
+    minimum_agl_ft = mission.get("minimum_agl_ft")
+    maximum_agl_ft = mission.get("maximum_agl_ft")
+
+    altitude_ft = telemetry.relative_altitude_ft
+
+    return (
+        minimum_agl_ft
+        <= altitude_ft
+        <= maximum_agl_ft
+    )
 
 
 def execute_preflight(
@@ -470,7 +557,7 @@ def get_postflight_assertions(
 
     compiler_assertions = compiler_ir.get("assertions")
 
-    if not isinstance(commands, list):
+    if not isinstance(compiler_assertions, list):
         raise ValueError(
             "Compiler IR is missing the assertions array."
         )
