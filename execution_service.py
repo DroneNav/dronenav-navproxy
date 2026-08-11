@@ -151,13 +151,36 @@ def run_navproxy_process(
             telemetry.mission_sequence,
         )
 
-        segment = None
+        segment = get_route_conformance_segment(
+            context.compiler_ir,
+            context.active_route_segment_index,
+        )
 
-        if telemetry.mission_sequence is not None:
-            segment = get_route_conformance_segment(
-                context.compiler_ir,
-                telemetry.mission_sequence,
+        if segment is not None:
+            crossed = evaluate_route_segment_boundary_crossing(
+                telemetry,
+                segment,
             )
+
+            if ( crossed and context.active_route_segment_index
+                 < len(context.compiler_ir["mission"]["route_conformance_segments"]) - 1 ):
+
+                context = replace(
+                    context,
+                    active_route_segment_index=(
+                        context.active_route_segment_index + 1
+                    ),
+                )
+
+                LOGGER.info(
+                    "Advanced to Route segment %s",
+                    context.active_route_segment_index,
+                )
+
+                segment = get_route_conformance_segment(
+                    context.compiler_ir,
+                    context.active_route_segment_index,
+                )
 
         if segment is not None:
             conformance = evaluate_route_conformance(
@@ -334,7 +357,7 @@ def _validate_wait_seconds(name: str, value: Any) -> int:
 
 def get_route_conformance_segment(
     compiler_ir: dict[str, Any],
-    mission_sequence: int,
+    active_route_segment_index: int,
 ) -> dict[str, Any] | None:
     """Return the Route conformance segment for a mission sequence."""
 
@@ -350,7 +373,7 @@ def get_route_conformance_segment(
     if not isinstance(conformance_segments, list):
         return None
 
-    segment_index = mission_sequence - 2
+    segment_index = active_route_segment_index
 
     if segment_index < 0:
         return None
@@ -362,6 +385,54 @@ def get_route_conformance_segment(
         "segment_index": segment_index,
         **conformance_segments[segment_index],
     }
+
+
+def evaluate_route_segment_boundary_crossing(
+    telemetry: TelemetryReading,
+    segment: dict[str, Any],
+) -> bool:
+    """Return whether telemetry crossed the segment's forward boundary."""
+
+    start_coordinate = segment["start_coordinate"]
+    end_coordinate = segment["end_coordinate"]
+
+    endpoint = (
+        f"{DEFAULT_API_BASE_URL.rstrip('/')}"
+        f"/api/routes/segment-boundary-crossing"
+    )
+
+    try:
+        response = requests.post(
+            endpoint,
+            json={
+                "latitude": telemetry.latitude,
+                "longitude": telemetry.longitude,
+                "start_latitude": start_coordinate[1],
+                "start_longitude": start_coordinate[0],
+                "end_latitude": end_coordinate[1],
+                "end_longitude": end_coordinate[0],
+            },
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            timeout=DEFAULT_API_TIMEOUT_SECONDS,
+        )
+
+        response.raise_for_status()
+        result = response.json()
+
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Could not evaluate Route segment boundary crossing: {exc}"
+        ) from exc
+
+    except requests.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Route segment boundary API returned invalid JSON."
+        ) from exc
+
+    return bool(result.get("crossed"))
 
 
 def evaluate_route_conformance(
