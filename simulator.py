@@ -45,7 +45,16 @@ class FlightSimulator:
     ) -> Iterator[TelemetryReading]:
         """Run the simulated flight and yield telemetry readings."""
 
-        yield from self.iter_telemetry(compiler_ir)
+        readings = list(self.iter_telemetry(compiler_ir))
+
+        if not readings:
+            return
+
+        delay_seconds = self.flight_seconds / len(readings)
+
+        for reading in readings:
+            yield reading
+            time.sleep(delay_seconds)
 
 
     def iter_telemetry(

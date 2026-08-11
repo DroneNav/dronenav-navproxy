@@ -34,6 +34,7 @@ from .settings import (
 )
 from .simulator import FlightSimulator, TelemetryReading
 from .tooling.fer_compiler import (
+    FlightExecutionCompileError,
     load_and_compile_flight_execution,
     load_flight_bands,
 )
@@ -87,9 +88,23 @@ def run_navproxy_process(
         ),
     )
 
-    flight_execution, compiler_ir = load_and_compile_flight_execution(
-        flight_execution_id=flight_execution_id,
-    )
+    try:
+        flight_execution, compiler_ir = load_and_compile_flight_execution(
+            flight_execution_id=flight_execution_id,
+        )
+    except FlightExecutionCompileError:
+        release_flight_execution(
+            flight_execution_id,
+        )
+
+        LOGGER.exception(
+            "NAVProxy Flight Execution compilation failed: "
+            "execution=%s flight=%s",
+            flight_execution_id,
+            flight_id,
+        )
+
+        return
 
     context = FlightProcessContext(
         flight_execution_id=flight_execution_id,
@@ -151,10 +166,53 @@ def run_navproxy_process(
             telemetry.mission_sequence,
         )
 
+        if context.active_operational_element == "departure_transition":
+            transition = context.compiler_ir["mission"]["departure_transition"]
+
+            inside_transition = evaluate_transition_point_containment(
+                telemetry,
+                transition,
+            )
+
+            if inside_transition:
+                continue
+
+            context = replace(
+                context,
+                active_operational_element="route",
+            )
+
+            LOGGER.info(
+                "Transitioned from departure transition to Route authority."
+            )
+
         segment = get_route_conformance_segment(
             context.compiler_ir,
             context.active_route_segment_index,
         )
+
+        route_transition = None
+
+        if (
+            segment is not None
+            and is_last_segment_of_route(
+                context.compiler_ir,
+                segment,
+            )
+        ):
+            route_transition = get_route_transition_for_segment(
+                context.compiler_ir,
+                segment,
+            )
+
+        if route_transition is not None:
+            inside_route_transition = evaluate_transition_point_containment(
+                telemetry,
+                route_transition,
+            )
+
+            if inside_route_transition:
+                continue
 
         if segment is not None:
             crossed = evaluate_route_segment_boundary_crossing(
@@ -182,7 +240,38 @@ def run_navproxy_process(
                     context.active_route_segment_index,
                 )
 
-        if segment is not None:
+        if (
+            context.active_operational_element == "route"
+            and segment is not None
+            and segment["flat_segment_index"]
+            == len(
+                context.compiler_ir["mission"]["route_conformance_segments"]
+            ) - 1
+        ):
+            transition = context.compiler_ir["mission"]["arrival_transition"]
+
+            inside_transition = evaluate_transition_point_containment(
+                telemetry,
+                transition,
+            )
+
+            if inside_transition:
+                context = replace(
+                    context,
+                    active_operational_element="arrival_transition",
+                )
+
+                LOGGER.info(
+                    "Transitioned from Route authority to arrival transition."
+                )
+
+                continue
+
+
+        if (
+            context.active_operational_element == "route"
+            and segment is not None
+        ):
             conformance = evaluate_route_conformance(
                 telemetry,
                 segment,
@@ -211,9 +300,10 @@ def run_navproxy_process(
                 )
 
         if (
-            segment is not None
-            and segment["segment_index"] > 0
-            and segment["segment_index"]
+            context.active_operational_element == "route"
+            and segment is not None
+            and segment["flat_segment_index"] > 0
+            and segment["flat_segment_index"]
             < len(
                 context.compiler_ir["mission"]["route_conformance_segments"]
             ) - 1
@@ -382,9 +472,42 @@ def get_route_conformance_segment(
         return None
  
     return {
-        "segment_index": segment_index,
+        "flat_segment_index": segment_index,
         **conformance_segments[segment_index],
     }
+
+
+def get_route_transition_for_segment(
+    compiler_ir: dict[str, Any],
+    segment: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return the Route-to-Route transition after this segment, if any."""
+
+    route_transitions = compiler_ir["mission"]["route_transitions"]
+
+    for transition in route_transitions:
+        if transition["from_route_index"] == segment["route_index"]:
+            return transition
+
+    return None
+
+
+def is_last_segment_of_route(
+    compiler_ir: dict[str, Any],
+    segment: dict[str, Any],
+) -> bool:
+    """Return whether this is the final segment of its Route."""
+
+    next_flat_index = segment["flat_segment_index"] + 1
+    segments = compiler_ir["mission"]["route_conformance_segments"]
+
+    if next_flat_index >= len(segments):
+        return True
+
+    return (
+        segments[next_flat_index]["route_index"]
+        != segment["route_index"]
+    )
 
 
 def evaluate_route_segment_boundary_crossing(
@@ -433,6 +556,59 @@ def evaluate_route_segment_boundary_crossing(
         ) from exc
 
     return bool(result.get("crossed"))
+
+
+def evaluate_transition_point_containment(
+    telemetry: TelemetryReading,
+    transition: dict[str, Any],
+) -> bool:
+    """Determine whether telemetry is inside a derived transition area."""
+
+    coordinate = transition["coordinate"]
+
+    endpoint = (
+        f"{DEFAULT_API_BASE_URL.rstrip('/')}"
+        f"/api/routes/transition-point-containment"
+    )
+
+    try:
+        response = requests.post(
+            endpoint,
+            json={
+                "latitude": telemetry.latitude,
+                "longitude": telemetry.longitude,
+                "center_latitude": coordinate[1],
+                "center_longitude": coordinate[0],
+                "diameter_ft": transition["diameter_ft"],
+            },
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            timeout=DEFAULT_API_TIMEOUT_SECONDS,
+        )
+
+        response.raise_for_status()
+        result = response.json()
+
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Could not evaluate transition containment: {exc}"
+        ) from exc
+
+    except requests.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Transition containment API returned invalid JSON."
+        ) from exc
+
+    inside = result.get("inside")
+
+    if not isinstance(inside, bool):
+        raise RuntimeError(
+            "Transition containment API response is missing inside."
+        )
+
+    return inside
 
 
 def evaluate_route_conformance(
@@ -690,9 +866,20 @@ def get_current_position(
     """Return the aircraft position appropriate to the flight stage."""
 
     if context.lifecycle_phase == "pre_flight":
-        return (
-            34.076687671,
-            -84.300904604,
+        for assertion in context.compiler_ir["assertions"]:
+            if (
+                assertion["assertion_type"]
+                == constants.NAV_ASSERT_POSITION_IN_GEOMETRY
+            ):
+                coordinate = assertion["parameters"]["coordinate"]
+
+                return (
+                    coordinate[1],
+                    coordinate[0],
+                )
+
+        raise RuntimeError(
+            "Compiler IR is missing the departure position assertion."
         )
 
     if context.lifecycle_phase == "in_flight":
@@ -701,10 +888,27 @@ def get_current_position(
         )
 
     if context.lifecycle_phase == "post_flight":
-        return (
-            34.071570629,
-            -84.301660192,
+        if context.compiler_ir is None:
+            raise ValueError(
+                "Flight process context is missing compiler IR."
+            )
+
+        for assertion in context.compiler_ir["assertions"]:
+            if (
+                assertion["assertion_type"]
+                == constants.NAV_ASSERT_ARRIVAL_IN_GEOMETRY
+            ):
+                coordinate = assertion["parameters"]["coordinate"]
+
+                return (
+                    coordinate[1],
+                    coordinate[0],
+                )
+
+        raise ValueError(
+            "Compiler IR is missing the arrival position assertion."
         )
+
 
     raise ValueError(
         f"Unknown flight lifecycle phase: {context.lifecycle_phase}"

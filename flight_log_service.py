@@ -23,7 +23,7 @@ class FlightProcessContext:
     flight_execution: dict[str, Any] | None = None
     compiler_ir: dict[str, Any] | None = None
     active_route_segment_index: int = 0
-
+    active_operational_element: str = "departure_transition"
 
 def get_requested_departure_datetime(
     flight_execution_id: str,

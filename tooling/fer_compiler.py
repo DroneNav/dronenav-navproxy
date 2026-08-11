@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.config.constants import (
     DEFAULT_API_BASE_URL,
     DEFAULT_API_TIMEOUT_SECONDS,
+    TRANSITION_DIAMETER_FT,
 )
 
 from app.navproxy.flight_band_resolver import resolve_applicable_flight_band
@@ -493,6 +494,7 @@ def build_route_assertions(
             {
                 "assertion_type": "NAV_ASSERT_ROUTE",
                 "parameters": {
+                    "route_id": route_id,  
                     "geometry_type": "linestring",
                     "coordinates": geometry["coordinates"],
                     "segment_attributes": segment_attributes,
@@ -569,18 +571,28 @@ def build_route_waypoint_coordinates(
         if route_index == 0:
             waypoint_coordinates.extend(route_coordinates)
         else:
-            if route_coordinates[0] != previous_route_endpoint:
+            if previous_route_endpoint is None:
                 raise FlightExecutionCompileError(
-                    "Ordered Routes are not contiguous. The first "
-                    "coordinate of each Route must equal the final "
-                    "coordinate of the preceding Route."
+                    "Previous Route endpoint is unavailable."
                 )
 
-            waypoint_coordinates.extend(route_coordinates[1:])
+            transition_distance_ft = get_coordinate_distance_ft(
+                previous_route_endpoint,
+                route_coordinates[0],
+            )
+
+            if transition_distance_ft > TRANSITION_DIAMETER_FT:
+                raise FlightExecutionCompileError(
+                    "Ordered Routes are too far apart for a valid "
+                    "Route transition."
+                )
+
+            waypoint_coordinates.extend(route_coordinates)
 
         previous_route_endpoint = route_coordinates[-1]
 
     return waypoint_coordinates
+
 
 def resolve_mission_altitude_band(
     flight_execution: dict[str, Any],
@@ -718,6 +730,73 @@ def build_mission_items(
     return mission_items
 
 
+def build_departure_transition(
+    launch_assertion: dict[str, Any],
+    route_conformance_segments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the departure DronePort-to-Route transition geometry."""
+
+    launch_coordinate = launch_assertion["parameters"]["coordinate"]
+    first_route_coordinate = (
+        route_conformance_segments[0]["start_coordinate"]
+    )
+
+    return {
+        "coordinate": build_transition_coordinate(
+            launch_coordinate,
+            first_route_coordinate,
+        ),
+        "diameter_ft": TRANSITION_DIAMETER_FT,
+    }
+
+
+def build_arrival_transition(
+    arrival_assertion: dict[str, Any],
+    route_conformance_segments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the final Route-to-arrival DronePort transition geometry."""
+
+    arrival_coordinate = arrival_assertion["parameters"]["coordinate"]
+    last_route_coordinate = (
+        route_conformance_segments[-1]["end_coordinate"]
+    )
+
+    return {
+        "coordinate": build_transition_coordinate(
+            last_route_coordinate,
+            arrival_coordinate,
+        ),
+        "diameter_ft": TRANSITION_DIAMETER_FT,
+    }
+
+
+def build_route_transitions(
+    route_assertions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build derived transition geometry between ordered Routes."""
+
+    transitions: list[dict[str, Any]] = []
+
+    for route_index in range(len(route_assertions) - 1):
+        current_parameters = route_assertions[route_index]["parameters"]
+        next_parameters = route_assertions[route_index + 1]["parameters"]
+
+        current_end = current_parameters["coordinates"][-1]
+        next_start = next_parameters["coordinates"][0]
+
+        transitions.append({
+            "from_route_index": route_index,
+            "to_route_index": route_index + 1,
+            "coordinate": build_transition_coordinate(
+                current_end,
+                next_start,
+            ),
+            "diameter_ft": TRANSITION_DIAMETER_FT,
+        })
+
+    return transitions
+
+
 def build_route_conformance_segments(
     route_assertions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -725,8 +804,9 @@ def build_route_conformance_segments(
 
     conformance_segments: list[dict[str, Any]] = []
 
-    for route_assertion in route_assertions:
+    for route_index, route_assertion in enumerate(route_assertions):
         parameters = route_assertion["parameters"]
+        route_id = parameters["route_id"]
         coordinates = parameters["coordinates"]
         segment_attributes = parameters["segment_attributes"]
 
@@ -736,6 +816,9 @@ def build_route_conformance_segments(
             attributes = segment_attributes[segment_index]
 
             conformance_segments.append({
+                "route_id": route_id,
+                "route_index": route_index,
+                "route_segment_index": segment_index,
                 "start_coordinate": start_coordinate,
                 "end_coordinate": end_coordinate,
                 "route_width_ft": attributes["route_width_ft"],
@@ -823,6 +906,20 @@ def interpret_flight_execution(
         route_assertions
     )
 
+    route_transitions = build_route_transitions(
+        route_assertions
+    )
+
+    departure_transition = build_departure_transition(
+        launch_assertion,
+        route_conformance_segments,
+    )
+
+    arrival_transition = build_arrival_transition(
+        arrival_assertion,
+        route_conformance_segments,
+    )
+
     minimum_agl_ft, maximum_agl_ft = resolve_mission_altitude_band(
         flight_execution
     )
@@ -840,6 +937,9 @@ def interpret_flight_execution(
             "minimum_agl_ft": minimum_agl_ft,
             "maximum_agl_ft": maximum_agl_ft,
             "route_conformance_segments": route_conformance_segments,
+            "departure_transition": departure_transition,
+            "route_transitions": route_transitions,
+            "arrival_transition": arrival_transition,
             "mission_items": mission_items,
         },
     }
@@ -901,6 +1001,71 @@ def load_json(path: Path) -> dict[str, Any]:
         )
 
     return value
+
+
+def build_transition_coordinate(
+    first_coordinate: list[float],
+    second_coordinate: list[float],
+) -> list[float]:
+    """Return the midpoint between two transition coordinates."""
+
+    return [
+        (first_coordinate[0] + second_coordinate[0]) / 2,
+        (first_coordinate[1] + second_coordinate[1]) / 2,
+    ]
+
+
+def get_coordinate_distance_ft(
+    first_coordinate: list[float],
+    second_coordinate: list[float],
+) -> float:
+    """Return the geodesic distance between two coordinates in feet."""
+
+    endpoint = (
+        f"{DEFAULT_API_BASE_URL.rstrip('/')}"
+        f"/api/routes/coordinate-distance"
+    )
+
+    try:
+        response = requests.post(
+            endpoint,
+            json={
+                "first_latitude": first_coordinate[1],
+                "first_longitude": first_coordinate[0],
+                "second_latitude": second_coordinate[1],
+                "second_longitude": second_coordinate[0],
+            },
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            timeout=DEFAULT_API_TIMEOUT_SECONDS,
+        )
+
+        response.raise_for_status()
+        result = response.json()
+
+    except requests.RequestException as exc:
+        raise FlightExecutionCompileError(
+            f"Could not calculate Route transition distance: {exc}"
+        ) from exc
+
+    except requests.JSONDecodeError as exc:
+        raise FlightExecutionCompileError(
+            "Route transition distance API returned invalid JSON."
+        ) from exc
+
+    distance_ft = result.get("distance_ft")
+
+    if isinstance(distance_ft, bool) or not isinstance(
+        distance_ft,
+        (int, float),
+    ):
+        raise FlightExecutionCompileError(
+            "Route transition distance API response is missing distance_ft."
+        )
+
+    return float(distance_ft)
 
 
 def parse_arguments() -> argparse.Namespace:
