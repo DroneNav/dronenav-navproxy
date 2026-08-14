@@ -132,15 +132,7 @@ def run_navproxy_process(
         len(compiler_ir.get("assertions", [])),
     )
 
-    if requested_departure_datetime is None:
-        preflight_result = execute_reusable_preflight(
-            context,
-            simulator,
-        )
-    else:
-        preflight_result = execute_scheduled_preflight(
-            context,
-        )
+    preflight_result = execute_preflight(context)
 
     record_preflight_result(
         context,
@@ -149,15 +141,9 @@ def run_navproxy_process(
 
     if preflight_result.status != constants.PreflightStatus.PASSED:
 
-        if requested_departure_datetime is None:
-            notify_flight_plan_status(
-                flight_execution_id=context.flight_execution_id,
-                status=FLIGHT_PLAN_STATUS_SUBMITTED,
-            )
-        else:
-            release_flight_execution(
-                context.flight_execution_id,
-            )
+        release_flight_execution(
+            context.flight_execution_id,
+        )
 
         LOGGER.warning(
             "NAVProxy execution stopped during preflight: "
@@ -732,183 +718,6 @@ def evaluate_vertical_conformance(
         <= altitude_ft
         <= maximum_agl_ft
     )
-
-
-def execute_scheduled_preflight(
-    context: FlightProcessContext,
-) -> PreflightResult:
-    """Execute preflight for a scheduled Flight Execution."""
-
-    return execute_preflight(context)
-
-
-def get_reusable_current_position(
-    simulator: FlightSimulator,
-) -> tuple[float, float]:
-    """Return the current aircraft position for reusable preflight."""
-
-    return simulator.get_current_position()
-
-
-def resolve_reusable_governing_geometry(
-    context: FlightProcessContext,
-    simulator: FlightSimulator,
-) -> dict[str, Any] | None:
-    """Resolve the governing geometry for a reusable Flight Execution."""
-
-    latitude, longitude = get_reusable_current_position(
-        simulator,
-    )
-
-    if isinstance(latitude, bool) or not isinstance(
-        latitude,
-        (int, float),
-    ):
-        raise ValueError(
-            "Flight controller returned an invalid latitude."
-        )
-
-    if isinstance(longitude, bool) or not isinstance(
-        longitude,
-        (int, float),
-    ):
-        raise ValueError(
-            "Flight controller returned an invalid longitude."
-        )
-
-    flight_execution = context.flight_execution
-    site_id = flight_execution["origin_site_id"]
-
-    endpoint = (
-        f"{DEFAULT_API_BASE_URL.rstrip('/')}"
-        f"/api/sites/{site_id}/package"
-    )
-
-    response = requests.get(
-        endpoint,
-        headers={
-            "Accept": "application/json",
-        },
-        timeout=DEFAULT_API_TIMEOUT_SECONDS,
-    )
-
-    response.raise_for_status()
-
-    site_package = response.json()
-
-    site = site_package["site"]
-    zones = site_package["zones"]
-
-    inclusion_zones = [
-        zone
-        for zone in zones
-        if zone["zone_type"] == "inclusion"
-    ]
-
-    for zone in inclusion_zones:
-        endpoint = (
-            f"{DEFAULT_API_BASE_URL.rstrip('/')}"
-            f"/api/zones/{zone['zone_id']}"
-            f"/point-containment"
-        )
-
-        response = requests.post(
-            endpoint,
-            json={
-                "latitude": latitude,
-                "longitude": longitude,
-            },
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            timeout=DEFAULT_API_TIMEOUT_SECONDS,
-        )
-
-        response.raise_for_status()
-
-        containment = response.json()
-
-        if containment["inside"]:
-            return {
-                "geometry_type": "zone",
-                "geometry": zone["geometry"],
-                "maximum_altitude_ft": zone["maximum_altitude_ft"],
-                "zone_id": zone["zone_id"],
-                "restricted_zones": [],
-            }
-
-    endpoint = (
-        f"{DEFAULT_API_BASE_URL.rstrip('/')}"
-        f"/api/sites/{site_id}"
-        f"/point-containment"
-    )
-
-    response = requests.post(
-        endpoint,
-        json={
-            "latitude": latitude,
-            "longitude": longitude,
-        },
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        },
-        timeout=DEFAULT_API_TIMEOUT_SECONDS,
-    )
-
-    response.raise_for_status()
-
-    containment = response.json()
-
-    if containment["inside"]:
-        return {
-            "geometry_type": "site",
-            "geometry": site["geometry"],
-            "maximum_altitude_ft": site["maximum_altitude_ft"],
-            "site_id": site["site_id"],
-            "restricted_zones": [
-                zone
-                for zone in zones
-                if zone["zone_type"] == "restricted"
-            ],
-        }
-
-    return None
-
-
-def execute_reusable_preflight(
-    context: FlightProcessContext,
-    simulator: FlightSimulator,
-) -> PreflightResult:
-    """Execute preflight for a reusable Flight Execution."""
-
-    governing_geometry = resolve_reusable_governing_geometry(
-        context,
-        simulator,
-    )
-
-    print("REUSABLE GOVERNING GEOMETRY:")
-    print(governing_geometry)
-
-    if governing_geometry is None:
-        failure_result = AssertionResult(
-            command="NAV_ASSERT_REUSABLE_POSITION_IN_GEOMETRY",
-            passed=False,
-            message=(
-                "Aircraft is outside the authorized reusable FER geometry."
-            ),
-        )
-
-        return PreflightResult(
-            flight_execution_uuid=context.flight_execution_id,
-            status=constants.PreflightStatus.FAILED,
-            assertion_results=(
-                failure_result,
-            ),
-        )
-
-    return execute_preflight(context)
 
 
 def execute_preflight(
