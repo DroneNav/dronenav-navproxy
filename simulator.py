@@ -32,7 +32,7 @@ class FlightSimulator:
 
 
     def run_preflight(self) -> None:
-        LOGGER.info(
+        LOGGER.debug(
             "Pre-flight checks in progress for %s second(s).",
             self.preflight_seconds,
         )
