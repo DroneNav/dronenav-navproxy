@@ -233,3 +233,151 @@ commands:
           field: z
           encoding: float
 
+  MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION:
+    id: 5001
+    description: Define one vertex of an inclusion geofence polygon.
+
+    emission:
+      message: MISSION_ITEM_INT
+      frame: MAV_FRAME_GLOBAL
+
+    parameters:
+      - position: 1
+        name: vertex_count
+        type: number
+        required: true
+        minimum: 3
+        emit:
+          field: param1
+          encoding: float
+
+      - position: 2
+        name: reserved_2
+        type: number
+        required: false
+        default: 0
+        emit:
+          field: param2
+          encoding: float
+
+      - position: 3
+        name: reserved_3
+        type: number
+        required: false
+        default: 0
+        emit:
+          field: param3
+          encoding: float
+
+      - position: 4
+        name: reserved_4
+        type: number
+        required: false
+        default: 0
+        emit:
+          field: param4
+          encoding: float
+
+      - position: 5
+        name: latitude
+        type: number
+        required: true
+        minimum: -90
+        maximum: 90
+        emit:
+          field: x
+          encoding: degree_e7
+
+      - position: 6
+        name: longitude
+        type: number
+        required: true
+        minimum: -180
+        maximum: 180
+        emit:
+          field: y
+          encoding: degree_e7
+
+      - position: 7
+        name: reserved_7
+        type: number
+        required: false
+        default: 0
+        emit:
+          field: z
+          encoding: float
+
+  MAV_CMD_NAV_FENCE_POLYGON_VERTEX_EXCLUSION:
+    id: 5002
+    description: Define one vertex of an exclusion geofence polygon.
+
+    emission:
+      message: MISSION_ITEM_INT
+      frame: MAV_FRAME_GLOBAL
+
+    parameters:
+      - position: 1
+        name: vertex_count
+        type: number
+        required: true
+        minimum: 3
+        emit:
+          field: param1
+          encoding: float
+
+      - position: 2
+        name: reserved_2
+        type: number
+        required: false
+        default: 0
+        emit:
+          field: param2
+          encoding: float
+
+      - position: 3
+        name: reserved_3
+        type: number
+        required: false
+        default: 0
+        emit:
+          field: param3
+          encoding: float
+
+      - position: 4
+        name: reserved_4
+        type: number
+        required: false
+        default: 0
+        emit:
+          field: param4
+          encoding: float
+
+      - position: 5
+        name: latitude
+        type: number
+        required: true
+        minimum: -90
+        maximum: 90
+        emit:
+          field: x
+          encoding: degree_e7
+
+      - position: 6
+        name: longitude
+        type: number
+        required: true
+        minimum: -180
+        maximum: 180
+        emit:
+          field: y
+          encoding: degree_e7
+
+      - position: 7
+        name: reserved_7
+        type: number
+        required: false
+        default: 0
+        emit:
+          field: z
+          encoding: float
+

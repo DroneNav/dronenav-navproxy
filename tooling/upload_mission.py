@@ -12,7 +12,7 @@ Usage:
     python -m tooling.upload_mission \
         tooling/metadata/mavlink_commands.yaml \
         tooling/examples/takeoff_waypoint_stream.json \
-        udp:127.0.0.1:14550
+        tcp:127.0.0.1:15762
 """
 
 from __future__ import annotations
@@ -24,19 +24,20 @@ from typing import Any
 
 from pymavlink import mavutil
 
-from tooling.compile_command_stream import (
-    compile_command_stream,
+from app.navproxy.tooling.mavlink_compiler import (
+    compile_mavlink_command_stream,
     load_json_file,
     load_yaml_file,
 )
-from tooling.emit_mission_stream import emit_mission_stream
-
+from app.navproxy.tooling.mavlink_emitter import (
+    emit_mission_stream,
+)
 
 class MissionUploadError(RuntimeError):
     """Raised when a MAVLink mission cannot be uploaded."""
 
 
-DEFAULT_CONNECTION = "udp:127.0.0.1:14550"
+DEFAULT_CONNECTION = "tcp:127.0.0.1:15762"
 DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 15.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 5.0
 DEFAULT_UPLOAD_TIMEOUT_SECONDS = 60.0
@@ -312,7 +313,7 @@ def build_emitted_mission(
     metadata = load_yaml_file(metadata_path)
     declarative_stream = load_json_file(command_stream_path)
 
-    compiled_stream = compile_command_stream(
+    compiled_stream = compile_mavlink_command_stream(
         metadata,
         declarative_stream,
     )

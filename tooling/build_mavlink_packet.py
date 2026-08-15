@@ -29,14 +29,14 @@ from typing import Any
 
 from pymavlink.dialects.v20 import common as mavlink2
 
-from tooling.compile_command import (
+from app.navproxy.tooling.compile_command import (
     CommandMetadataError,
     CommandValidationError,
     compile_command,
     load_json_file,
     load_yaml_file,
 )
-from tooling.emit_mission_item_int import (
+from app.navproxy.tooling.emit_mission_item_int import (
     MissionItemEmissionError,
     emit_mission_item_int,
 )

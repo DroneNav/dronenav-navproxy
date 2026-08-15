@@ -1,0 +1,8 @@
+{
+  "command": "MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION",
+  "parameters": {
+    "vertex_count": 5,
+    "latitude": 34.079076347,
+    "longitude": -84.300378441
+  }
+}

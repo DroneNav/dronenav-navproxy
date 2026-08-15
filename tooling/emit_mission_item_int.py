@@ -33,10 +33,12 @@ from app.navproxy.tooling.compile_command import (
 
 # MAVLink enum values from the common message set.
 MAVLINK_FRAME_VALUES = {
+    "MAV_FRAME_GLOBAL": 0,
     "MAV_FRAME_GLOBAL_RELATIVE_ALT": 3,
 }
 
 MAV_MISSION_TYPE_MISSION = 0
+MAV_MISSION_TYPE_FENCE = 1
 
 INT32_MIN = -(2**31)
 INT32_MAX = (2**31) - 1

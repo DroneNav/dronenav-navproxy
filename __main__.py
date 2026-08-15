@@ -6,6 +6,7 @@ import argparse
 import logging
 
 from .execution_service import run_navproxy_process
+from .reusable_execution_service import run_reusable_navproxy_process
 from .settings import DEFAULT_FLIGHT_SECONDS, DEFAULT_PREFLIGHT_SECONDS
 
 
@@ -35,6 +36,12 @@ def _parse_arguments() -> argparse.Namespace:
         default=DEFAULT_FLIGHT_SECONDS,
         help=f"In-flight wait in seconds. Default: {DEFAULT_FLIGHT_SECONDS}.",
     )
+    parser.add_argument(
+        "--execution-mode",
+        choices=("scheduled", "reusable"),
+        default="scheduled",
+        help="NAVProxy execution profile. Default: scheduled.",
+    )
     return parser.parse_args()
 
 
@@ -46,13 +53,20 @@ def main() -> None:
 
     arguments = _parse_arguments()
 
-    run_navproxy_process(
-        flight_execution_id=arguments.flight_execution_id,
-        flight_id=arguments.flight_id,
-        preflight_seconds=arguments.preflight_seconds,
-        flight_seconds=arguments.flight_seconds,
-    )
-
+    if arguments.execution_mode == "reusable":
+        run_reusable_navproxy_process(
+            flight_execution_id=arguments.flight_execution_id,
+            flight_id=arguments.flight_id,
+            preflight_seconds=arguments.preflight_seconds,
+            flight_seconds=arguments.flight_seconds,
+        )
+    else:
+        run_navproxy_process(
+            flight_execution_id=arguments.flight_execution_id,
+            flight_id=arguments.flight_id,
+            preflight_seconds=arguments.preflight_seconds,
+            flight_seconds=arguments.flight_seconds,
+        )
 
 if __name__ == "__main__":
     main()
