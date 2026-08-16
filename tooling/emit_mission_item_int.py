@@ -35,6 +35,7 @@ from app.navproxy.tooling.compile_command import (
 MAVLINK_FRAME_VALUES = {
     "MAV_FRAME_GLOBAL": 0,
     "MAV_FRAME_GLOBAL_RELATIVE_ALT": 3,
+    "MAV_FRAME_MISSION": 2,
 }
 
 MAV_MISSION_TYPE_MISSION = 0

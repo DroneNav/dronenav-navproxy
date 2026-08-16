@@ -381,3 +381,79 @@ commands:
           field: z
           encoding: float
 
+  MAV_CMD_DO_CHANGE_SPEED:
+    id: 178
+    description: Change the target vehicle speed.
+
+    emission:
+      message: MISSION_ITEM_INT
+      frame: MAV_FRAME_MISSION
+
+    parameters:
+      - position: 1
+        name: speed_type
+        type: number
+        required: false
+        default: 1
+        minimum: 0
+        maximum: 3
+        emit:
+          field: param1
+          encoding: float
+
+      - position: 2
+        name: speed_meters_per_second
+        type: number
+        required: true
+        minimum: 0
+        emit:
+          field: param2
+          encoding: float
+
+      - position: 3
+        name: throttle_percent
+        type: number
+        required: false
+        default: -1
+        emit:
+          field: param3
+          encoding: float
+
+      - position: 4
+        name: absolute
+        type: number
+        required: false
+        default: 0
+        minimum: 0
+        maximum: 1
+        emit:
+          field: param4
+          encoding: float
+
+      - position: 5
+        name: reserved_5
+        type: number
+        required: false
+        default: 0
+        emit:
+          field: x
+          encoding: degree_e7
+
+      - position: 6
+        name: reserved_6
+        type: number
+        required: false
+        default: 0
+        emit:
+          field: y
+          encoding: degree_e7
+
+      - position: 7
+        name: reserved_7
+        type: number
+        required: false
+        default: 0
+        emit:
+          field: z
+          encoding: float
+

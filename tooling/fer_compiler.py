@@ -594,6 +594,56 @@ def build_route_waypoint_coordinates(
     return waypoint_coordinates
 
 
+def build_route_waypoint_ranges(
+    route_assertions: list[dict[str, Any]],
+) -> list[dict[str, int]]:
+    """Return flattened waypoint index ranges for ordered Routes."""
+
+    ranges: list[dict[str, int]] = []
+    waypoint_index = 0
+
+    for route_index, route_assertion in enumerate(route_assertions):
+        coordinates = route_assertion["parameters"]["coordinates"]
+
+        start_index = waypoint_index
+        end_index = waypoint_index + len(coordinates) - 1
+
+        ranges.append({
+            "route_index": route_index,
+            "start_waypoint_index": start_index,
+            "end_waypoint_index": end_index,
+        })
+
+        waypoint_index = end_index + 1
+
+    return ranges
+
+
+def build_route_speed_limits(
+    route_assertions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return the entry and exit speed limits for each ordered Route."""
+
+    route_speed_limits: list[dict[str, Any]] = []
+
+    for route_index, route_assertion in enumerate(route_assertions):
+        segment_attributes = (
+            route_assertion["parameters"]["segment_attributes"]
+        )
+
+        route_speed_limits.append({
+            "route_index": route_index,
+            "entry_speed_limit_mph": (
+                segment_attributes[0]["speed_limit_mph"]
+            ),
+            "exit_speed_limit_mph": (
+                segment_attributes[-1]["speed_limit_mph"]
+            ),
+        })
+
+    return route_speed_limits
+
+
 def resolve_mission_altitude_band(
     flight_execution: dict[str, Any],
 ) -> tuple[int | float, int | float]:
@@ -660,6 +710,9 @@ def resolve_mission_altitude_band(
 
 def build_mission_items(
     waypoint_coordinates: list[list[float]],
+    route_conformance_segments: list[dict[str, Any]],
+    route_waypoint_ranges: list[dict[str, int]],
+    route_speed_limits: list[dict[str, Any]],
     minimum_agl_ft: int | float,
     arrival_assertion: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -716,6 +769,18 @@ def build_mission_items(
                 "altitude_meters": minimum_agl_ft * 0.3048,
             },
         })
+
+    mission_items = insert_initial_route_speed(
+        mission_items,
+        route_conformance_segments,
+    )
+
+    mission_items = insert_route_transition_speeds(
+        mission_items,
+        route_waypoint_ranges,
+        route_speed_limits,
+        initial_speed_inserted=True,
+    )
 
     mission_items.append({
         "sequence": len(mission_items),
@@ -781,6 +846,12 @@ def build_route_transitions(
         current_parameters = route_assertions[route_index]["parameters"]
         next_parameters = route_assertions[route_index + 1]["parameters"]
 
+        current_segment_attributes = current_parameters["segment_attributes"]
+        next_segment_attributes = next_parameters["segment_attributes"]
+
+        from_speed_limit_mph = current_segment_attributes[-1]["speed_limit_mph"]
+        to_speed_limit_mph = next_segment_attributes[0]["speed_limit_mph"]
+
         current_end = current_parameters["coordinates"][-1]
         next_start = next_parameters["coordinates"][0]
 
@@ -792,6 +863,12 @@ def build_route_transitions(
                 next_start,
             ),
             "diameter_ft": TRANSITION_DIAMETER_FT,
+            "from_speed_limit_mph": from_speed_limit_mph,
+            "to_speed_limit_mph": to_speed_limit_mph,
+            "transition_speed_mph": min(
+                from_speed_limit_mph,
+                to_speed_limit_mph,
+            ),
         })
 
     return transitions
@@ -822,6 +899,7 @@ def build_route_conformance_segments(
                 "start_coordinate": start_coordinate,
                 "end_coordinate": end_coordinate,
                 "route_width_ft": attributes["route_width_ft"],
+                "speed_limit_mph": attributes["speed_limit_mph"],
             })
 
     return conformance_segments
@@ -902,6 +980,14 @@ def interpret_flight_execution(
         route_assertions
     )
 
+    route_waypoint_ranges = build_route_waypoint_ranges(
+        route_assertions
+    )
+
+    route_speed_limits = build_route_speed_limits(
+        route_assertions
+    )
+
     route_conformance_segments = build_route_conformance_segments(
         route_assertions
     )
@@ -926,6 +1012,9 @@ def interpret_flight_execution(
 
     mission_items = build_mission_items(
         waypoint_coordinates=waypoint_coordinates,
+        route_conformance_segments=route_conformance_segments,
+        route_waypoint_ranges=route_waypoint_ranges,
+        route_speed_limits=route_speed_limits,
         minimum_agl_ft=minimum_agl_ft,
         arrival_assertion=arrival_assertion,
     )
@@ -936,9 +1025,11 @@ def interpret_flight_execution(
         "mission": {
             "minimum_agl_ft": minimum_agl_ft,
             "maximum_agl_ft": maximum_agl_ft,
+            "route_waypoint_ranges": route_waypoint_ranges,
             "route_conformance_segments": route_conformance_segments,
             "departure_transition": departure_transition,
             "route_transitions": route_transitions,
+            "route_speed_limits": route_speed_limits,
             "arrival_transition": arrival_transition,
             "mission_items": mission_items,
         },
@@ -1013,6 +1104,119 @@ def build_transition_coordinate(
         (first_coordinate[0] + second_coordinate[0]) / 2,
         (first_coordinate[1] + second_coordinate[1]) / 2,
     ]
+
+
+def insert_initial_route_speed(
+    mission_items: list[dict[str, Any]],
+    route_conformance_segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Insert the initial Route cruise speed after the first Route segment."""
+
+    if not route_conformance_segments:
+        return mission_items
+
+    first_speed_limit_mph = (
+        route_conformance_segments[0]["speed_limit_mph"]
+    )
+
+    speed_item = build_change_speed_item(
+        first_speed_limit_mph
+    )
+
+    # TAKEOFF is sequence 0.
+    # Waypoint 1 enters the first Route.
+    # Waypoint 2 completes the first Route segment.
+    # Apply cruise speed after that point.
+    insert_index = 3
+
+    mission_items.insert(
+        insert_index,
+        speed_item,
+    )
+
+    for sequence, item in enumerate(mission_items):
+        item["sequence"] = sequence
+
+    return mission_items
+
+def insert_route_transition_speeds(
+    mission_items: list[dict[str, Any]],
+    route_waypoint_ranges: list[dict[str, int]],
+    route_speed_limits: list[dict[str, Any]],
+    *,
+    initial_speed_inserted: bool,
+) -> list[dict[str, Any]]:
+    """Insert speed changes around Route-to-Route transitions."""
+
+    if len(route_waypoint_ranges) < 2:
+        return mission_items
+
+    inserted_count = 1 if initial_speed_inserted else 0
+
+    for route_index in range(len(route_waypoint_ranges) - 1):
+        current_speed = route_speed_limits[route_index][
+            "exit_speed_limit_mph"
+        ]
+        next_speed = route_speed_limits[route_index + 1][
+            "entry_speed_limit_mph"
+        ]
+
+        if next_speed == current_speed:
+            continue
+
+        current_range = route_waypoint_ranges[route_index]
+        next_range = route_waypoint_ranges[route_index + 1]
+
+        if next_speed < current_speed:
+            insert_index = (
+                current_range["end_waypoint_index"]
+                + 1
+                + inserted_count
+            )
+        else:
+            insert_index = (
+                next_range["start_waypoint_index"]
+                + 2
+                + inserted_count
+            )
+
+        mission_items.insert(
+            insert_index,
+            build_change_speed_item(next_speed),
+        )
+
+        inserted_count += 1
+
+    for sequence, item in enumerate(mission_items):
+        item["sequence"] = sequence
+
+    return mission_items
+
+
+def mph_to_meters_per_second(
+    value: int | float,
+) -> float:
+    """Convert miles per hour to meters per second."""
+
+    return value * 0.44704
+
+
+def build_change_speed_item(
+    speed_limit_mph: int | float,
+) -> dict[str, Any]:
+    """Build a MAVLink speed-change mission item."""
+
+    return {
+        "command": "MAV_CMD_DO_CHANGE_SPEED",
+        "parameters": {
+            "speed_type": 1,
+            "speed_meters_per_second": mph_to_meters_per_second(
+                speed_limit_mph
+            ),
+            "throttle_percent": -1,
+            "absolute": 0,
+        },
+    }
 
 
 def get_coordinate_distance_ft(

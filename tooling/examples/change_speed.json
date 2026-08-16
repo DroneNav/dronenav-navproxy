@@ -1,0 +1,10 @@
+{
+  "command": "MAV_CMD_DO_CHANGE_SPEED",
+  "parameters": {
+    "speed_type": 1,
+    "speed_meters_per_second": 6.7056,
+    "throttle_percent": -1,
+    "absolute": 0
+  }
+}
+
