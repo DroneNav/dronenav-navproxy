@@ -8,7 +8,7 @@ commands:
 
     emission:
       message: MISSION_ITEM_INT
-      frame: MAV_FRAME_GLOBAL_RELATIVE_ALT
+      frame: MAV_FRAME_GLOBAL
 
     parameters:
       - position: 1
@@ -86,7 +86,7 @@ commands:
 
     emission:
       message: MISSION_ITEM_INT
-      frame: MAV_FRAME_GLOBAL_RELATIVE_ALT
+      frame: MAV_FRAME_GLOBAL
 
     parameters:
       - position: 1
@@ -163,7 +163,7 @@ commands:
 
     emission:
       message: MISSION_ITEM_INT
-      frame: MAV_FRAME_GLOBAL_RELATIVE_ALT
+      frame: MAV_FRAME_GLOBAL
 
     parameters:
       - position: 1

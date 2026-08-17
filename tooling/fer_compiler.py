@@ -594,6 +594,46 @@ def build_route_waypoint_coordinates(
     return waypoint_coordinates
 
 
+def build_route_waypoint_altitudes(
+    route_assertions: list[dict[str, Any]],
+    minimum_agl_ft: int | float,
+) -> list[float]:
+    """Build absolute altitude in meters for each Route waypoint."""
+
+    waypoint_altitudes: list[float] = []
+
+    for route_assertion in route_assertions:
+        parameters = route_assertion["parameters"]
+        coordinates = parameters["coordinates"]
+        segment_attributes = parameters["segment_attributes"]
+
+        if len(segment_attributes) != len(coordinates) - 1:
+            raise FlightExecutionCompileError(
+                "Route segment attributes do not match Route geometry."
+            )
+
+        first_ground_elevation_ft = (
+            segment_attributes[0]["ground_elevation_ft"]
+        )
+
+        waypoint_altitudes.append(
+            absolute_altitude_meters(
+                first_ground_elevation_ft,
+                minimum_agl_ft,
+            )
+        )
+
+        for attributes in segment_attributes:
+            waypoint_altitudes.append(
+                absolute_altitude_meters(
+                    attributes["ground_elevation_ft"],
+                    minimum_agl_ft,
+                )
+            )
+
+    return waypoint_altitudes
+
+
 def build_route_waypoint_ranges(
     route_assertions: list[dict[str, Any]],
 ) -> list[dict[str, int]]:
@@ -710,6 +750,7 @@ def resolve_mission_altitude_band(
 
 def build_mission_items(
     waypoint_coordinates: list[list[float]],
+    waypoint_altitudes: list[float],
     route_conformance_segments: list[dict[str, Any]],
     route_waypoint_ranges: list[dict[str, int]],
     route_speed_limits: list[dict[str, Any]],
@@ -720,6 +761,11 @@ def build_mission_items(
 
     if not waypoint_coordinates:
         return []
+
+    if len(waypoint_altitudes) != len(waypoint_coordinates):
+        raise FlightExecutionCompileError(
+            "Route waypoint altitude count does not match waypoint count."
+        )
 
     if (
         isinstance(minimum_agl_ft, bool)
@@ -747,6 +793,24 @@ def build_mission_items(
             "Scheduled corridor flight requires an arrival coordinate."
         )
 
+    departure_ground_elevation_ft = (
+        route_conformance_segments[0]["ground_elevation_ft"]
+    )
+
+    takeoff_altitude_meters = absolute_altitude_meters(
+        departure_ground_elevation_ft,
+        minimum_agl_ft,
+    )
+
+    destination_ground_elevation_ft = (
+        route_conformance_segments[-1]["ground_elevation_ft"]
+    )
+
+    landing_altitude_meters = absolute_altitude_meters(
+        destination_ground_elevation_ft,
+        0,
+    )
+
     mission_items: list[dict[str, Any]] = [
         {
             "sequence": 0,
@@ -754,19 +818,22 @@ def build_mission_items(
             "parameters": {
                 "latitude": 0,
                 "longitude": 0,
-                "altitude_meters": minimum_agl_ft * 0.3048,
+                "altitude_meters": takeoff_altitude_meters,
             },
         }
     ]
 
-    for coordinate in waypoint_coordinates:
+    for coordinate, altitude_meters in zip(
+        waypoint_coordinates,
+        waypoint_altitudes,
+    ):
         mission_items.append({
             "sequence": len(mission_items),
             "command": "MAV_CMD_NAV_WAYPOINT",
             "parameters": {
                 "latitude": coordinate[1],
                 "longitude": coordinate[0],
-                "altitude_meters": minimum_agl_ft * 0.3048,
+                "altitude_meters": altitude_meters,
             },
         })
 
@@ -788,7 +855,7 @@ def build_mission_items(
         "parameters": {
             "latitude": arrival_coordinate[1],
             "longitude": arrival_coordinate[0],
-            "altitude_meters": 0,
+            "altitude_meters": landing_altitude_meters,
         },
     })
 
@@ -900,6 +967,7 @@ def build_route_conformance_segments(
                 "end_coordinate": end_coordinate,
                 "route_width_ft": attributes["route_width_ft"],
                 "speed_limit_mph": attributes["speed_limit_mph"],
+                "ground_elevation_ft": attributes["ground_elevation_ft"],
             })
 
     return conformance_segments
@@ -980,6 +1048,15 @@ def interpret_flight_execution(
         route_assertions
     )
 
+    minimum_agl_ft, maximum_agl_ft = resolve_mission_altitude_band(
+        flight_execution
+    )
+
+    waypoint_altitudes = build_route_waypoint_altitudes(
+        route_assertions,
+        minimum_agl_ft,
+    )
+
     route_waypoint_ranges = build_route_waypoint_ranges(
         route_assertions
     )
@@ -1006,12 +1083,9 @@ def interpret_flight_execution(
         route_conformance_segments,
     )
 
-    minimum_agl_ft, maximum_agl_ft = resolve_mission_altitude_band(
-        flight_execution
-    )
-
     mission_items = build_mission_items(
         waypoint_coordinates=waypoint_coordinates,
+        waypoint_altitudes=waypoint_altitudes,
         route_conformance_segments=route_conformance_segments,
         route_waypoint_ranges=route_waypoint_ranges,
         route_speed_limits=route_speed_limits,
@@ -1199,6 +1273,18 @@ def mph_to_meters_per_second(
     """Convert miles per hour to meters per second."""
 
     return value * 0.44704
+
+
+def absolute_altitude_meters(
+    ground_elevation_ft: int | float,
+    agl_ft: int | float,
+) -> float:
+    """Return absolute flight altitude in meters."""
+
+    return (
+        ground_elevation_ft
+        + agl_ft
+    ) * 0.3048
 
 
 def build_change_speed_item(

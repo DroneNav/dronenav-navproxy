@@ -182,6 +182,13 @@ def run_reusable_navproxy_process(
 
     set_parameter(
         connection,
+        "FENCE_ALT_MAX_TP",
+        0.0,
+        timeout_seconds=5.0,
+    )
+
+    set_parameter(
+        connection,
         "FENCE_ALT_MAX",
         maximum_altitude_meters,
         timeout_seconds=5.0,
@@ -305,6 +312,8 @@ def resolve_governing_geometry(
                 "geometry_type": "zone",
                 "geometry": zone["geometry"],
                 "maximum_altitude_ft": zone["maximum_altitude_ft"],
+                "ground_elevation_ft": min(attribute["ground_elevation_ft"]
+                    for attribute in zone["zone_attributes"]),
                 "zone_id": zone["zone_id"],
                 "restricted_zones": [],
             }
@@ -320,6 +329,8 @@ def resolve_governing_geometry(
             "geometry_type": "site",
             "geometry": site["geometry"],
             "maximum_altitude_ft": site["maximum_altitude_ft"],
+            "ground_elevation_ft": min(attribute["ground_elevation_ft"]
+                for attribute in site["site_attributes"]),
             "site_id": site_id,
             "restricted_zones": [
                 zone
@@ -432,7 +443,10 @@ def build_geofence_definition(
 
     return {
         "inclusion_geometry": governing_geometry["geometry"],
-        "maximum_altitude_ft": governing_geometry["maximum_altitude_ft"],
+        "maximum_altitude_ft": (
+            governing_geometry["ground_elevation_ft"]
+            + governing_geometry["maximum_altitude_ft"]
+        ),
         "exclusion_geometries": [
             zone["geometry"]
             for zone in governing_geometry["restricted_zones"]

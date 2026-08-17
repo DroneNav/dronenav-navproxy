@@ -18,16 +18,18 @@ class ReusableFlightSimulator:
 
     def get_current_position(self) -> tuple[float, float]:
         """Return the simulated aircraft's current latitude and longitude."""
-        """   Zone...
+        """   Zone...  """
         return (
             34.0778,
             -84.3015,
         )
+        
         """
         return (
             34.0784,
             -84.3010,
         )
+        """
         """  Outside, neither Zone nor Site...
         return (
             34.0850,
