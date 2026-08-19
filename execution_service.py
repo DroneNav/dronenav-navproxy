@@ -47,6 +47,9 @@ from .tooling.fer_compiler import (
 )
 from .flight_band_resolver import resolve_applicable_flight_band
 
+from app.navproxy.telemetry_publisher import TelemetryPublisher
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -166,213 +169,222 @@ def run_navproxy_process(
         tolerance_ft=5.0,
     )
 
-    for telemetry in simulator.run_flight(context.compiler_ir):
-        LOGGER.debug(
-            "Telemetry: lat=%s lon=%s alt_ft=%s armed=%s heartbeat=%s sequence=%s",
-            telemetry.latitude,
-            telemetry.longitude,
-            telemetry.relative_altitude_ft,
-            telemetry.armed,
-            telemetry.heartbeat_active,
-            telemetry.mission_sequence,
-        )
+    telemetry_publisher = TelemetryPublisher()
 
-        sampled_coordinates = actual_path_sampler.add(
-            telemetry,
-        )
-
-        if len(sampled_coordinates) == 2:
-            start_actual_path(
+    try:
+        for telemetry in simulator.run_flight(context.compiler_ir):
+            telemetry_publisher.publish(
                 flight_execution_id=context.flight_execution_id,
                 flight_id=context.flight_id,
-                coordinates=sampled_coordinates,
+                telemetry=telemetry,
             )
 
-        elif sampled_coordinates:
-            update_actual_path(
-                flight_execution_id=context.flight_execution_id,
-                flight_id=context.flight_id,
-                coordinates=sampled_coordinates,
+            LOGGER.debug(
+                "Telemetry: lat=%s lon=%s alt_ft=%s armed=%s heartbeat=%s sequence=%s",
+                telemetry.latitude,
+                telemetry.longitude,
+                telemetry.relative_altitude_ft,
+                telemetry.armed,
+                telemetry.heartbeat_active,
+                telemetry.mission_sequence,
             )
 
-        if context.active_operational_element == "departure_transition":
-            transition = context.compiler_ir["mission"]["departure_transition"]
-
-            inside_transition = evaluate_transition_point_containment(
+            sampled_coordinates = actual_path_sampler.add(
                 telemetry,
-                transition,
             )
 
-            if inside_transition:
-                continue
+            if len(sampled_coordinates) == 2:
+                start_actual_path(
+                    flight_execution_id=context.flight_execution_id,
+                    flight_id=context.flight_id,
+                    coordinates=sampled_coordinates,
+                )
 
-            context = replace(
-                context,
-                active_operational_element="route",
-            )
+            elif sampled_coordinates:
+                update_actual_path(
+                    flight_execution_id=context.flight_execution_id,
+                    flight_id=context.flight_id,
+                    coordinates=sampled_coordinates,
+                )
 
-            LOGGER.info(
-                "Transitioned from departure transition to Route authority."
-            )
+            if context.active_operational_element == "departure_transition":
+                transition = context.compiler_ir["mission"]["departure_transition"]
 
-        segment = get_route_conformance_segment(
-            context.compiler_ir,
-            context.active_route_segment_index,
-        )
+                inside_transition = evaluate_transition_point_containment(
+                    telemetry,
+                    transition,
+                )
 
-        route_transition = None
-
-        if (
-            segment is not None
-            and is_last_segment_of_route(
-                context.compiler_ir,
-                segment,
-            )
-        ):
-            route_transition = get_route_transition_for_segment(
-                context.compiler_ir,
-                segment,
-            )
-
-        if route_transition is not None:
-            inside_route_transition = evaluate_transition_point_containment(
-                telemetry,
-                route_transition,
-            )
-
-            if inside_route_transition:
-                continue
-
-        if segment is not None:
-            crossed = evaluate_route_segment_boundary_crossing(
-                telemetry,
-                segment,
-            )
-
-            if ( crossed and context.active_route_segment_index
-                 < len(context.compiler_ir["mission"]["route_conformance_segments"]) - 1 ):
+                if inside_transition:
+                    continue
 
                 context = replace(
                     context,
-                    active_route_segment_index=(
-                        context.active_route_segment_index + 1
-                    ),
-                )
-
-                LOGGER.debug(
-                    "Advanced to Route segment %s",
-                    context.active_route_segment_index,
-                )
-
-                segment = get_route_conformance_segment(
-                    context.compiler_ir,
-                    context.active_route_segment_index,
-                )
-
-        if (
-            context.active_operational_element == "route"
-            and segment is not None
-            and segment["flat_segment_index"]
-            == len(
-                context.compiler_ir["mission"]["route_conformance_segments"]
-            ) - 1
-        ):
-            transition = context.compiler_ir["mission"]["arrival_transition"]
-
-            inside_transition = evaluate_transition_point_containment(
-                telemetry,
-                transition,
-            )
-
-            if inside_transition:
-                context = replace(
-                    context,
-                    active_operational_element="arrival_transition",
+                    active_operational_element="route",
                 )
 
                 LOGGER.info(
-                    "Transitioned from Route authority to arrival transition."
+                    "Transitioned from departure transition to Route authority."
                 )
 
-                continue
-
-
-        if (
-            context.active_operational_element == "route"
-            and segment is not None
-        ):
-            conformance = evaluate_route_conformance(
-                telemetry,
-                segment,
-            )
-
-            if not conformance["inside"]:
-                LOGGER.warning(
-                    "Route conformance violation: "
-                    "centerline_offset_ft=%s allowed_offset_ft=%s sequence=%s",
-                    conformance["distance_ft"],
-                    conformance["half_width_ft"],
-                    telemetry.mission_sequence,
-                )
-                append_flight_log(
-                    context=context,
-                    lifecycle_phase="in_flight",
-                    event_type="Route Deviation",
-                    event_status="Violation",
-                    message="Aircraft moved outside the authorized flight route.",
-                    details={
-                        "centerline_offset_ft": conformance["distance_ft"],
-                        "allowed_offset_ft": conformance["half_width_ft"],
-                        "latitude": telemetry.latitude,
-                        "longitude": telemetry.longitude,
-                    },
-                )
-
-        if (
-            context.active_operational_element == "route"
-            and segment is not None
-            and segment["flat_segment_index"] > 0
-            and segment["flat_segment_index"]
-            < len(
-                context.compiler_ir["mission"]["route_conformance_segments"]
-            ) - 1
-        ):
-            vertical_conformance = evaluate_vertical_conformance(
+            segment = get_route_conformance_segment(
                 context.compiler_ir,
-                telemetry,
+                context.active_route_segment_index,
             )
 
-            if not vertical_conformance:
-                LOGGER.warning(
-                    "Vertical conformance violation: "
-                    "altitude_ft=%s minimum_agl_ft=%s maximum_agl_ft=%s "
-                    "sequence=%s lat=%s lon=%s",
-                    telemetry.relative_altitude_ft,
-                    context.compiler_ir["mission"]["minimum_agl_ft"],
-                    context.compiler_ir["mission"]["maximum_agl_ft"],
-                    telemetry.mission_sequence,
-                    telemetry.latitude,
-                    telemetry.longitude,
+            route_transition = None
+
+            if (
+                segment is not None
+                and is_last_segment_of_route(
+                    context.compiler_ir,
+                    segment,
                 )
-                append_flight_log(
-                    context=context,
-                    lifecycle_phase="in_flight",
-                    event_type="Altitude Deviation",
-                    event_status="Violation",
-                    message="Aircraft moved outside the authorized altitude range.",
-                    details={
-                        "aircraft_altitude_ft": telemetry.relative_altitude_ft,
-                        "minimum_altitude_ft": (
-                            context.compiler_ir["mission"]["minimum_agl_ft"]
-                        ),
-                        "maximum_altitude_ft": (
-                            context.compiler_ir["mission"]["maximum_agl_ft"]
-                        ),
-                        "latitude": telemetry.latitude,
-                        "longitude": telemetry.longitude,
-                    },
+            ):
+                route_transition = get_route_transition_for_segment(
+                    context.compiler_ir,
+                    segment,
                 )
 
+            if route_transition is not None:
+                inside_route_transition = evaluate_transition_point_containment(
+                    telemetry,
+                    route_transition,
+                )
+
+                if inside_route_transition:
+                    continue
+
+            if segment is not None:
+                crossed = evaluate_route_segment_boundary_crossing(
+                    telemetry,
+                    segment,
+                )
+
+                if ( crossed and context.active_route_segment_index
+                     < len(context.compiler_ir["mission"]["route_conformance_segments"]) - 1 ):
+
+                    context = replace(
+                        context,
+                        active_route_segment_index=(
+                            context.active_route_segment_index + 1
+                        ),
+                    )
+
+                    LOGGER.debug(
+                        "Advanced to Route segment %s",
+                        context.active_route_segment_index,
+                    )
+
+                    segment = get_route_conformance_segment(
+                        context.compiler_ir,
+                        context.active_route_segment_index,
+                    )
+
+            if (
+                context.active_operational_element == "route"
+                and segment is not None
+                and segment["flat_segment_index"]
+                == len(
+                    context.compiler_ir["mission"]["route_conformance_segments"]
+                ) - 1
+            ):
+                transition = context.compiler_ir["mission"]["arrival_transition"]
+
+                inside_transition = evaluate_transition_point_containment(
+                    telemetry,
+                    transition,
+                )
+
+                if inside_transition:
+                    context = replace(
+                        context,
+                        active_operational_element="arrival_transition",
+                    )
+
+                    LOGGER.info(
+                        "Transitioned from Route authority to arrival transition."
+                    )
+
+                    continue
+
+            if (
+                context.active_operational_element == "route"
+                and segment is not None
+            ):
+                conformance = evaluate_route_conformance(
+                    telemetry,
+                    segment,
+                )
+
+                if not conformance["inside"]:
+                    LOGGER.warning(
+                        "Route conformance violation: "
+                        "centerline_offset_ft=%s allowed_offset_ft=%s sequence=%s",
+                        conformance["distance_ft"],
+                        conformance["half_width_ft"],
+                        telemetry.mission_sequence,
+                    )
+                    append_flight_log(
+                        context=context,
+                        lifecycle_phase="in_flight",
+                        event_type="Route Deviation",
+                        event_status="Violation",
+                        message="Aircraft moved outside the authorized flight route.",
+                        details={
+                            "centerline_offset_ft": conformance["distance_ft"],
+                            "allowed_offset_ft": conformance["half_width_ft"],
+                            "latitude": telemetry.latitude,
+                            "longitude": telemetry.longitude,
+                        },
+                    )
+
+            if (
+                context.active_operational_element == "route"
+                and segment is not None
+                and segment["flat_segment_index"] > 0
+                and segment["flat_segment_index"]
+                < len(
+                    context.compiler_ir["mission"]["route_conformance_segments"]
+                ) - 1
+            ):
+                vertical_conformance = evaluate_vertical_conformance(
+                    context.compiler_ir,
+                    telemetry,
+                )
+
+                if not vertical_conformance:
+                    LOGGER.warning(
+                        "Vertical conformance violation: "
+                        "altitude_ft=%s minimum_agl_ft=%s maximum_agl_ft=%s "
+                        "sequence=%s lat=%s lon=%s",
+                        telemetry.relative_altitude_ft,
+                        context.compiler_ir["mission"]["minimum_agl_ft"],
+                        context.compiler_ir["mission"]["maximum_agl_ft"],
+                        telemetry.mission_sequence,
+                        telemetry.latitude,
+                        telemetry.longitude,
+                    )
+                    append_flight_log(
+                        context=context,
+                        lifecycle_phase="in_flight",
+                        event_type="Altitude Deviation",
+                        event_status="Violation",
+                        message="Aircraft moved outside the authorized altitude range.",
+                        details={
+                            "aircraft_altitude_ft": telemetry.relative_altitude_ft,
+                            "minimum_altitude_ft": (
+                                context.compiler_ir["mission"]["minimum_agl_ft"]
+                            ),
+                            "maximum_altitude_ft": (
+                                context.compiler_ir["mission"]["maximum_agl_ft"]
+                            ),
+                            "latitude": telemetry.latitude,
+                            "longitude": telemetry.longitude,
+                        },
+                    )
+    finally:
+        telemetry_publisher.close()
 
     final_coordinates = actual_path_sampler.finish()
 
