@@ -95,7 +95,7 @@ source ~/venv-ardupilot/bin/activate
 Start the simulator.
 
 ```bash
-sim_vehicle.py -v ArduCopter --console --map
+sim_vehicle.py -v ArduCopter --console --map -l 34.077756274,-84.301123283,334.61,0
 ```
 
 Wait until SITL has completely initialized before proceeding.

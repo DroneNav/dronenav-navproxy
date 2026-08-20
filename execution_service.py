@@ -55,6 +55,9 @@ from app.navproxy.scheduled_mission_validator import (
 from app.navproxy.tooling.program_scheduled_mission import (
     program_scheduled_mission,
 )
+from app.navproxy.tooling.start_scheduled_flight import (
+    start_scheduled_flight,
+)
 from app.navproxy.tooling.upload_mission import (
     DEFAULT_CONNECTION,
     connect_vehicle,
@@ -199,6 +202,10 @@ def run_navproxy_process(
         validate_programmed_scheduled_mission(
             connection=connection,
             compiler_ir=context.compiler_ir,
+        )
+
+        start_scheduled_flight(
+            connection=connection,
         )
 
         mavlink_telemetry_source = MavlinkTelemetrySource(
@@ -402,9 +409,16 @@ def run_navproxy_process(
                     context.compiler_ir["mission"]["route_conformance_segments"]
                 ) - 1
             ):
+                actual_agl_ft = (
+                    telemetry.absolute_altitude_ft
+                    - segment["ground_elevation_ft"]
+                    if telemetry.absolute_altitude_ft is not None
+                    else telemetry.relative_altitude_ft
+                )
+
                 vertical_conformance = evaluate_vertical_conformance(
                     context.compiler_ir,
-                    telemetry,
+                    actual_agl_ft,
                 )
 
                 if not vertical_conformance:
@@ -412,7 +426,7 @@ def run_navproxy_process(
                         "Vertical conformance violation: "
                         "altitude_ft=%s minimum_agl_ft=%s maximum_agl_ft=%s "
                         "sequence=%s lat=%s lon=%s",
-                        telemetry.relative_altitude_ft,
+                        actual_agl_ft,
                         context.compiler_ir["mission"]["minimum_agl_ft"],
                         context.compiler_ir["mission"]["maximum_agl_ft"],
                         telemetry.mission_sequence,
@@ -426,7 +440,7 @@ def run_navproxy_process(
                         event_status="Violation",
                         message="Aircraft moved outside the authorized altitude range.",
                         details={
-                            "aircraft_altitude_ft": telemetry.relative_altitude_ft,
+                            "aircraft_altitude_ft": actual_agl_ft,
                             "minimum_altitude_ft": (
                                 context.compiler_ir["mission"]["minimum_agl_ft"]
                             ),
@@ -764,10 +778,9 @@ def evaluate_route_conformance(
 
     return result
 
-
 def evaluate_vertical_conformance(
     compiler_ir: dict[str, Any],
-    telemetry: TelemetryReading,
+    altitude_agl_ft: float,
 ) -> bool:
     """Evaluate one telemetry altitude against the Flight Band."""
 
@@ -779,7 +792,7 @@ def evaluate_vertical_conformance(
     minimum_agl_ft = mission.get("minimum_agl_ft")
     maximum_agl_ft = mission.get("maximum_agl_ft")
 
-    altitude_ft = telemetry.relative_altitude_ft
+    altitude_ft = altitude_agl_ft
 
     return (
         minimum_agl_ft

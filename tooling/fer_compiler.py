@@ -31,6 +31,7 @@ from app.config.constants import (
     DEFAULT_API_BASE_URL,
     DEFAULT_API_TIMEOUT_SECONDS,
     TRANSITION_DIAMETER_FT,
+    MISSION_ALTITUDE_MARGIN_FT,
 )
 
 from app.navproxy.flight_band_resolver import resolve_applicable_flight_band
@@ -619,7 +620,7 @@ def build_route_waypoint_altitudes(
         waypoint_altitudes.append(
             absolute_altitude_meters(
                 first_ground_elevation_ft,
-                minimum_agl_ft,
+                minimum_agl_ft + MISSION_ALTITUDE_MARGIN_FT,
             )
         )
 
@@ -627,7 +628,7 @@ def build_route_waypoint_altitudes(
             waypoint_altitudes.append(
                 absolute_altitude_meters(
                     attributes["ground_elevation_ft"],
-                    minimum_agl_ft,
+                    minimum_agl_ft + MISSION_ALTITUDE_MARGIN_FT,
                 )
             )
 
@@ -800,7 +801,7 @@ def build_mission_items(
 
     takeoff_altitude_meters = absolute_altitude_meters(
         departure_ground_elevation_ft,
-        minimum_agl_ft,
+        minimum_agl_ft + MISSION_ALTITUDE_MARGIN_FT,
     )
 
     destination_ground_elevation_ft = (

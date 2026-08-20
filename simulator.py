@@ -20,6 +20,7 @@ class TelemetryReading:
     armed: bool
     heartbeat_active: bool
     mission_sequence: int | None = None
+    absolute_altitude_ft: float | None = None
 
 
 
