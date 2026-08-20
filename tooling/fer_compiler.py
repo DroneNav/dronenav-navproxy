@@ -749,6 +749,7 @@ def resolve_mission_altitude_band(
 
 
 def build_mission_items(
+    launch_assertion: dict[str, Any],
     waypoint_coordinates: list[list[float]],
     waypoint_altitudes: list[float],
     route_conformance_segments: list[dict[str, Any]],
@@ -811,14 +812,31 @@ def build_mission_items(
         0,
     )
 
+    launch_parameters = launch_assertion.get("parameters")
+
+    if not isinstance(launch_parameters, dict):
+        raise FlightExecutionCompileError(
+            "Launch assertion is missing its parameters object."
+        )
+
+    launch_coordinate = launch_parameters.get("coordinate")
+
+    if (
+        not isinstance(launch_coordinate, list)
+        or len(launch_coordinate) < 2
+    ):
+        raise FlightExecutionCompileError(
+            "Launch assertion is missing its coordinate."
+        )
+
     mission_items: list[dict[str, Any]] = [
         {
             "sequence": 0,
             "command": "MAV_CMD_NAV_TAKEOFF",
             "parameters": {
-                "latitude": 0,
-                "longitude": 0,
-                "altitude_meters": takeoff_altitude_meters,
+            "latitude": launch_coordinate[1],
+            "longitude": launch_coordinate[0],
+            "altitude_meters": takeoff_altitude_meters,
             },
         }
     ]
@@ -1084,6 +1102,7 @@ def interpret_flight_execution(
     )
 
     mission_items = build_mission_items(
+        launch_assertion=launch_assertion,
         waypoint_coordinates=waypoint_coordinates,
         waypoint_altitudes=waypoint_altitudes,
         route_conformance_segments=route_conformance_segments,

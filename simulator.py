@@ -31,9 +31,11 @@ class FlightSimulator:
         self.flight_seconds = flight_seconds
 
 
-    def run_preflight(self) -> None:
+    def wait_for_preflight_delay(self) -> None:
+        """Wait for the configured simulated preflight delay."""
+
         LOGGER.debug(
-            "Pre-flight checks in progress for %s second(s).",
+            "Simulated preflight delay for %s second(s).",
             self.preflight_seconds,
         )
         time.sleep(self.preflight_seconds)
@@ -147,7 +149,7 @@ class FlightSimulator:
             yield TelemetryReading(
                 latitude=launch_latitude,
                 longitude=launch_longitude,
-                relative_altitude_ft=altitude_meters / 0.3048,
+                relative_altitude_ft=float(mission["minimum_agl_ft"]),
                 armed=True,
                 heartbeat_active=True,
                 mission_sequence=mission_item.get("sequence"),
@@ -181,7 +183,7 @@ class FlightSimulator:
             yield TelemetryReading(
                 latitude=latitude,
                 longitude=longitude,
-                relative_altitude_ft=altitude_meters / 0.3048,
+                relative_altitude_ft=float(mission["minimum_agl_ft"]),
                 armed=True,
                 heartbeat_active=True,
                 mission_sequence=mission_item.get("sequence"),

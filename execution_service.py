@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass, replace
@@ -40,10 +41,23 @@ from .settings import (
     FLIGHT_PLAN_STATUS_SUBMITTED,
 )
 from .simulator import FlightSimulator, TelemetryReading
+from app.navproxy.mavlink_telemetry import (
+    MavlinkTelemetrySource,
+)
 from .tooling.fer_compiler import (
     FlightExecutionCompileError,
     load_and_compile_flight_execution,
     load_flight_bands,
+)
+from app.navproxy.scheduled_mission_validator import (
+    validate_programmed_scheduled_mission,
+)
+from app.navproxy.tooling.program_scheduled_mission import (
+    program_scheduled_mission,
+)
+from app.navproxy.tooling.upload_mission import (
+    DEFAULT_CONNECTION,
+    connect_vehicle,
 )
 from .flight_band_resolver import resolve_applicable_flight_band
 
@@ -52,6 +66,10 @@ from app.navproxy.telemetry_publisher import TelemetryPublisher
 
 LOGGER = logging.getLogger(__name__)
 
+NAVPROXY_FC_MODE = os.environ.get(
+    "NAVPROXY_FC_MODE",
+    "simulator",
+).strip().lower()
 
 @dataclass(frozen=True)
 class AssertionResult:
@@ -85,7 +103,13 @@ def run_navproxy_process(
     preflight_seconds: int = DEFAULT_PREFLIGHT_SECONDS,
     flight_seconds: int = DEFAULT_FLIGHT_SECONDS,
 ) -> None:
-    """Run one NAVProxy-controlled simulated aircraft flight."""
+    """Run one NAVProxy-controlled scheduled flight."""
+
+    if NAVPROXY_FC_MODE not in {"simulator", "mavlink"}:
+        raise RuntimeError(
+            "NAVPROXY_FC_MODE must be 'simulator' or 'mavlink'. "
+            f"Received: {NAVPROXY_FC_MODE!r}"
+        )
 
     simulator = FlightSimulator(
         preflight_seconds=_validate_wait_seconds(
@@ -156,7 +180,30 @@ def run_navproxy_process(
         )
         return
 
-    simulator.run_preflight()
+    if NAVPROXY_FC_MODE == "simulator":
+        simulator.wait_for_preflight_delay()
+
+    connection = None
+
+    if NAVPROXY_FC_MODE == "mavlink":
+        connection = connect_vehicle(
+            DEFAULT_CONNECTION,
+            10.0,
+        )
+
+        program_scheduled_mission(
+            connection=connection,
+            compiler_ir=context.compiler_ir,
+        )
+
+        validate_programmed_scheduled_mission(
+            connection=connection,
+            compiler_ir=context.compiler_ir,
+        )
+
+        mavlink_telemetry_source = MavlinkTelemetrySource(
+            connection
+        )
 
     _start_flight(context)
 
@@ -172,7 +219,14 @@ def run_navproxy_process(
     telemetry_publisher = TelemetryPublisher()
 
     try:
-        for telemetry in simulator.run_flight(context.compiler_ir):
+        if NAVPROXY_FC_MODE == "mavlink":
+            telemetry_iterable = mavlink_telemetry_source.iter_telemetry()
+        else:
+            telemetry_iterable = simulator.run_flight(
+                context.compiler_ir
+            )
+
+        for telemetry in telemetry_iterable:
             telemetry_publisher.publish(
                 flight_execution_id=context.flight_execution_id,
                 flight_id=context.flight_id,
@@ -385,6 +439,8 @@ def run_navproxy_process(
                     )
     finally:
         telemetry_publisher.close()
+        if connection is not None:
+            connection.close()
 
     final_coordinates = actual_path_sampler.finish()
 
