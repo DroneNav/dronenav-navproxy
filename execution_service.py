@@ -268,6 +268,28 @@ def run_navproxy_process(
                     coordinates=sampled_coordinates,
                 )
 
+            if (
+                context.active_operational_element == "arrival_transition"
+                and not telemetry.armed
+            ):
+                context = replace(
+                    context,
+                    final_position=(
+                        telemetry.latitude,
+                        telemetry.longitude,
+                    ),
+                )
+
+                LOGGER.info(
+                    "Landing detected from FC disarm: "
+                    "lat=%s lon=%s sequence=%s",
+                    telemetry.latitude,
+                    telemetry.longitude,
+                    telemetry.mission_sequence,
+                )
+
+                break
+
             if context.active_operational_element == "departure_transition":
                 transition = context.compiler_ir["mission"]["departure_transition"]
 
@@ -284,7 +306,7 @@ def run_navproxy_process(
                     active_operational_element="route",
                 )
 
-                LOGGER.info(
+                LOGGER.debug(
                     "Transitioned from departure transition to Route authority."
                 )
 
@@ -363,7 +385,7 @@ def run_navproxy_process(
                         active_operational_element="arrival_transition",
                     )
 
-                    LOGGER.info(
+                    LOGGER.debug(
                         "Transitioned from Route authority to arrival transition."
                     )
 
@@ -1005,27 +1027,12 @@ def get_current_position(
         )
 
     if context.lifecycle_phase == "post_flight":
-        if context.compiler_ir is None:
+        if context.final_position is None:
             raise ValueError(
-                "Flight process context is missing compiler IR."
+                "Flight process context is missing the final aircraft position."
             )
 
-        for assertion in context.compiler_ir["assertions"]:
-            if (
-                assertion["assertion_type"]
-                == constants.NAV_ASSERT_ARRIVAL_IN_GEOMETRY
-            ):
-                coordinate = assertion["parameters"]["coordinate"]
-
-                return (
-                    coordinate[1],
-                    coordinate[0],
-                )
-
-        raise ValueError(
-            "Compiler IR is missing the arrival position assertion."
-        )
-
+        return context.final_position
 
     raise ValueError(
         f"Unknown flight lifecycle phase: {context.lifecycle_phase}"
