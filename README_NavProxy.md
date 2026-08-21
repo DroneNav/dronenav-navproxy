@@ -55,22 +55,34 @@ python -m app.navproxy \
   --flight-seconds 10
 ```
 
-## Migration
+## Manual Simulator Launch
 
-After this package is installed under `app/navproxy/` and tested, the placeholder `navproxy_proxy_service.py` can be removed. Any scheduler or launcher command that currently invokes the placeholder should instead run:
+NAVProxy normally runs against the configured MAVLink flight controller. For development and testing, a scheduled Flight Execution can be launched explicitly using the NAVProxy simulator without changing the normal system configuration.
+
+Use:
 
 ```bash
-python -m app.navproxy ...
+python -m app.navproxy.tooling.launch_simulator_flight \
+  --flight-execution-id <FLIGHT_EXECUTION_UUID>
 ```
 
-The simulator preserves the current behavior:
+The manual simulator launcher:
 
-1. Validate the Flight Execution and Flight Log.
-2. Simulate pre-flight activity.
-3. Transition the Flight Log to `in_flight`.
-4. Notify Drupal that the Flight Plan is `active`.
-5. Simulate flight.
-6. Complete the Flight Log.
-7. Complete scheduled Flight Executions while leaving reusable executions active.
-8. Notify Drupal of the resulting Flight Plan status.
+1. Loads the specified scheduled Flight Execution.
+2. Atomically claims the Flight Execution and creates its Flight Log using the same launch path used by the scheduler.
+3. Launches NAVProxy with `NAVPROXY_FC_MODE=simulator` for that NAVProxy process only.
+4. Performs normal pre-flight validation.
+5. Transitions the Flight Log to `in_flight`.
+6. Notifies Drupal that the Flight Plan is `active`.
+7. Generates simulated flight-controller telemetry from the compiled Flight Execution.
+8. Simulates landing and aircraft disarm.
+9. Performs normal post-flight validation.
+10. Completes the Flight Log and scheduled Flight Execution.
+11. Notifies Drupal that the Flight Plan is `completed`.
+
+The simulator override applies only to the NAVProxy process launched by this tool. It does not change the configured default flight-controller mode.
+
+The production scheduler continues to launch NAVProxy normally using the configured flight-controller mode. With `NAVPROXY_FC_MODE=mavlink` configured as the normal environment setting, scheduler-launched Flight Executions use the MAVLink flight-controller integration.
+
+Scheduled Flight Executions are atomically claimed. A Flight Execution that has already been claimed by the scheduler or another launcher cannot be reused by the manual simulator launcher.
 
