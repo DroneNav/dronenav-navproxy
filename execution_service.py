@@ -7,7 +7,7 @@ import os
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import requests
@@ -42,6 +42,7 @@ from .settings import (
 )
 from .simulator import FlightSimulator, TelemetryReading
 from app.navproxy.mavlink_telemetry import (
+    HeartbeatRecoveryExpired,
     MavlinkTelemetrySource,
 )
 from .tooling.fer_compiler import (
@@ -50,6 +51,7 @@ from .tooling.fer_compiler import (
     load_flight_bands,
 )
 from app.navproxy.scheduled_mission_validator import (
+    normalize_ardupilot_mission_sequence,
     validate_programmed_scheduled_mission,
 )
 from app.navproxy.tooling.program_scheduled_mission import (
@@ -61,6 +63,9 @@ from app.navproxy.tooling.start_scheduled_flight import (
 from app.navproxy.tooling.upload_mission import (
     DEFAULT_CONNECTION,
     connect_vehicle,
+)
+from app.models.flight_execution_model import (
+    complete_scheduled_flight_execution,
 )
 from .flight_band_resolver import resolve_applicable_flight_band
 
@@ -113,6 +118,11 @@ def run_navproxy_process(
             "NAVPROXY_FC_MODE must be 'simulator' or 'mavlink'. "
             f"Received: {NAVPROXY_FC_MODE!r}"
         )
+
+    LOGGER.info(
+        "NAVProxy flight-controller mode: %s",
+        NAVPROXY_FC_MODE,
+    )
 
     simulator = FlightSimulator(
         preflight_seconds=_validate_wait_seconds(
@@ -209,7 +219,8 @@ def run_navproxy_process(
         )
 
         mavlink_telemetry_source = MavlinkTelemetrySource(
-            connection
+            connection,
+            DEFAULT_CONNECTION,
         )
 
     _start_flight(context)
@@ -225,6 +236,8 @@ def run_navproxy_process(
 
     telemetry_publisher = TelemetryPublisher()
 
+    last_telemetry: TelemetryReading | None = None
+
     try:
         if NAVPROXY_FC_MODE == "mavlink":
             telemetry_iterable = mavlink_telemetry_source.iter_telemetry()
@@ -234,6 +247,31 @@ def run_navproxy_process(
             )
 
         for telemetry in telemetry_iterable:
+            last_telemetry = telemetry
+
+            if (
+                NAVPROXY_FC_MODE == "mavlink"
+                and telemetry.mission_sequence is not None
+                and mavlink_telemetry_source.consume_reconnect_flag()
+            ):
+                route_segment_index = get_route_segment_index_for_mission_sequence(
+                    context.compiler_ir,
+                    telemetry.mission_sequence,
+                )
+
+                if route_segment_index is not None:
+                    context = replace(
+                        context,
+                        active_route_segment_index=route_segment_index,
+                    )
+
+                    LOGGER.debug(
+                        "Resynchronized Route segment after MAVLink reconnect: "
+                        "sequence=%s segment_index=%s",
+                        telemetry.mission_sequence,
+                        route_segment_index,
+                    )
+
             telemetry_publisher.publish(
                 flight_execution_id=context.flight_execution_id,
                 flight_id=context.flight_id,
@@ -267,6 +305,12 @@ def run_navproxy_process(
                     flight_id=context.flight_id,
                     coordinates=sampled_coordinates,
                 )
+
+            if (
+                NAVPROXY_FC_MODE == "mavlink"
+                and mavlink_telemetry_source.reconnect_pending()
+            ):
+                continue
 
             if (
                 context.active_operational_element == "arrival_transition"
@@ -473,10 +517,74 @@ def run_navproxy_process(
                             "longitude": telemetry.longitude,
                         },
                     )
+
+    except HeartbeatRecoveryExpired:
+        details: dict[str, Any] = {}
+
+        if last_telemetry is not None:
+            details = {
+                "latitude": last_telemetry.latitude,
+                "longitude": last_telemetry.longitude,
+                "relative_altitude_ft": (
+                    last_telemetry.relative_altitude_ft
+                ),
+                "absolute_altitude_ft": (
+                    last_telemetry.absolute_altitude_ft
+                ),
+                "armed": last_telemetry.armed,
+                "mission_sequence": (
+                    last_telemetry.mission_sequence
+                ),
+            }
+
+        append_flight_log(
+            context=context,
+            lifecycle_phase="in_flight",
+            event_type="communications_lost",
+            event_status="failed",
+            message=(
+                "Flight-controller heartbeat was lost "
+                "and did not recover."
+            ),
+            details=details or None,
+        )
+
+        LOGGER.warning(
+            "NAVProxy monitoring terminated after heartbeat loss: "
+            "execution=%s flight=%s",
+            context.flight_execution_id,
+            context.flight_id,
+        )
+
+        final_coordinates = actual_path_sampler.finish()
+
+        complete_actual_path(
+            flight_execution_id=context.flight_execution_id,
+            flight_id=context.flight_id,
+            coordinates=final_coordinates or None,
+        )
+
+        complete_scheduled_flight_execution(
+            context.flight_execution_id,
+            datetime.now(timezone.utc),
+        )
+
+        notify_flight_plan_status(
+            flight_execution_id=context.flight_execution_id,
+            status=FLIGHT_PLAN_STATUS_COMPLETED,
+        )
+
+        return
+
     finally:
         telemetry_publisher.close()
+
         if connection is not None:
-            connection.close()
+           try:
+               connection.close()
+           except (AttributeError, OSError):
+               pass 
+
 
     final_coordinates = actual_path_sampler.finish()
 
@@ -615,6 +723,70 @@ def get_route_conformance_segment(
         "flat_segment_index": segment_index,
         **conformance_segments[segment_index],
     }
+
+
+def get_route_segment_index_for_mission_sequence(
+    compiler_ir: dict[str, Any],
+    mission_sequence: int,
+) -> int | None:
+    """Map an ArduPilot mission sequence to a Route segment index."""
+
+    normalized_sequence = normalize_ardupilot_mission_sequence(
+        mission_sequence
+    )
+
+    mission_items = compiler_ir["mission"]["mission_items"]
+
+    if (
+        normalized_sequence < 0
+        or normalized_sequence >= len(mission_items)
+    ):
+        return None
+
+    mission_item = mission_items[normalized_sequence]
+
+    waypoint_index = mission_item.get("waypoint_index")
+
+    if not isinstance(waypoint_index, int):
+        return None
+
+    route_waypoint_ranges = compiler_ir["mission"][
+        "route_waypoint_ranges"
+    ]
+
+    conformance_segments = compiler_ir["mission"][
+        "route_conformance_segments"
+    ]
+
+    for waypoint_range in route_waypoint_ranges:
+        if (
+            waypoint_range["start_waypoint_index"]
+            <= waypoint_index
+            <= waypoint_range["end_waypoint_index"]
+        ):
+            route_index = waypoint_range["route_index"]
+
+            route_waypoint_index = (
+                waypoint_index
+                - waypoint_range["start_waypoint_index"]
+            )
+
+            route_segment_index = max(
+                0,
+                route_waypoint_index - 1,
+            )
+
+            for flat_segment_index, segment in enumerate(
+                conformance_segments
+            ):
+                if (
+                    segment["route_index"] == route_index
+                    and segment["route_segment_index"]
+                    == route_segment_index
+                ):
+                    return flat_segment_index
+
+    return None
 
 
 def get_route_transition_for_segment(

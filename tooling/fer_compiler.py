@@ -842,12 +842,15 @@ def build_mission_items(
         }
     ]
 
-    for coordinate, altitude_meters in zip(
-        waypoint_coordinates,
-        waypoint_altitudes,
+    for waypoint_index, (coordinate, altitude_meters) in enumerate(
+        zip(
+            waypoint_coordinates,
+            waypoint_altitudes,
+        )
     ):
         mission_items.append({
             "sequence": len(mission_items),
+            "waypoint_index": waypoint_index,
             "command": "MAV_CMD_NAV_WAYPOINT",
             "parameters": {
                 "latitude": coordinate[1],

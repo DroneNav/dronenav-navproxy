@@ -96,7 +96,7 @@ def connect_vehicle(
 
     connection = mavutil.mavlink_connection(
         connection_string,
-        autoreconnect=True,
+        autoreconnect=False,
     )
 
     heartbeat = connection.wait_heartbeat(

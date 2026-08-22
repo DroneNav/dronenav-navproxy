@@ -220,6 +220,15 @@ class FlightSimulator:
                 mission_sequence=mission_item.get("sequence"),
             )
 
+            yield TelemetryReading(
+                latitude=latitude,
+                longitude=longitude,
+                relative_altitude_ft=0.0,
+                armed=False,
+                heartbeat_active=True,
+                mission_sequence=mission_item.get("sequence"),
+            )
+
             break
 
 
