@@ -51,6 +51,9 @@ def build_telemetry_message(
             "armed": telemetry.armed,
             "heartbeat_active": telemetry.heartbeat_active,
             "mission_sequence": telemetry.mission_sequence,
+            "battery_percent": telemetry.battery_percent,
+            "navigation_health": telemetry.navigation_health,
+            "vehicle_health": telemetry.vehicle_health,
         },
     }
 

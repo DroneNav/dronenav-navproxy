@@ -22,6 +22,10 @@ class TelemetryReading:
     mission_sequence: int | None = None
     absolute_altitude_ft: float | None = None
 
+    battery_percent: float | None = None
+    navigation_health: str | None = None
+    vehicle_health: str | None = None
+
 
 
 class FlightSimulator:

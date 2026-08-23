@@ -15,6 +15,13 @@ from app.config.constants import (
     HEARTBEAT_RECOVERY_WINDOW_SECONDS,
 )
 
+from app.navproxy.fc_adapters.ardupilot import (
+    battery_percent_from_sys_status,
+    is_flight_controller_heartbeat,
+    navigation_health_from_gps,
+)
+
+
 class HeartbeatRecoveryExpired(RuntimeError):
     """Raised when flight-controller heartbeat does not recover in time."""
 
@@ -45,6 +52,7 @@ def request_message_interval(
         0,
     )
 
+
 class MavlinkTelemetrySource:
     """Produce normalized NAVProxy telemetry from a MAVLink flight controller."""
 
@@ -67,6 +75,18 @@ class MavlinkTelemetrySource:
             connection,
             message_id=mavutil.mavlink.MAVLINK_MSG_ID_MISSION_CURRENT,
             frequency_hz=2.0,
+        )
+
+        request_message_interval(
+            connection,
+            message_id=mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS,
+            frequency_hz=1.0,
+        )
+
+        request_message_interval(
+            connection,
+            message_id=mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT,
+            frequency_hz=1.0,
         )
 
 
@@ -100,6 +120,18 @@ class MavlinkTelemetrySource:
                 connection,
                 message_id=mavutil.mavlink.MAVLINK_MSG_ID_MISSION_CURRENT,
                 frequency_hz=2.0,
+            )
+
+            request_message_interval(
+                connection,
+                message_id=mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS,
+                frequency_hz=1.0,
+            )
+
+            request_message_interval(
+                connection,
+                message_id=mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT,
+                frequency_hz=1.0,
             )
 
             return True
@@ -165,6 +197,12 @@ class MavlinkTelemetrySource:
         mission_sequence: int | None = None
         last_heartbeat_at = time.monotonic()
         heartbeat_lost_at: float | None = None
+        battery_percent: float | None = None
+        gps_fix_type: int | None = None
+        gps_satellites_visible: int | None = None
+        gps_eph: int | None = None
+        gps_epv: int | None = None
+        navigation_health: str | None = None
 
         while True:
             if heartbeat_lost_at is not None:
@@ -172,6 +210,8 @@ class MavlinkTelemetrySource:
                     last_heartbeat_at = time.monotonic()
                     heartbeat_lost_at = None
                     mission_sequence = None
+                    battery_percent = None
+                    navigation_health = None
                     continue
 
                 recovery_age = (
@@ -197,6 +237,8 @@ class MavlinkTelemetrySource:
                         "HEARTBEAT",
                         "GLOBAL_POSITION_INT",
                         "MISSION_CURRENT",
+                        "SYS_STATUS",
+                        "GPS_RAW_INT",
                     ],
                     blocking=False,
                 )
@@ -226,6 +268,12 @@ class MavlinkTelemetrySource:
             message_type = message.get_type()
 
             if message_type == "HEARTBEAT":
+                if not is_flight_controller_heartbeat(
+                    message,
+                    target_system=self.connection.target_system,
+                ):
+                    continue
+
                 last_heartbeat_at = time.monotonic()
                 heartbeat_lost_at = None
                 armed = bool(
@@ -236,6 +284,27 @@ class MavlinkTelemetrySource:
 
             if message_type == "MISSION_CURRENT":
                 mission_sequence = int(message.seq)
+                continue
+
+            if message_type == "SYS_STATUS":
+                battery_percent = battery_percent_from_sys_status(
+                    message
+                )
+                continue
+
+            if message_type == "GPS_RAW_INT":
+                gps_fix_type = int(message.fix_type)
+                gps_satellites_visible = int(message.satellites_visible)
+                gps_eph = int(message.eph)
+                gps_epv = int(message.epv)
+
+                navigation_health = navigation_health_from_gps(
+                    fix_type=gps_fix_type,
+                    satellites_visible=gps_satellites_visible,
+                    eph=gps_eph,
+                    epv=gps_epv,
+                )
+
                 continue
 
             if message_type != "GLOBAL_POSITION_INT":
@@ -253,5 +322,7 @@ class MavlinkTelemetrySource:
                 armed=armed,
                 heartbeat_active=True,
                 mission_sequence=mission_sequence,
+                battery_percent=battery_percent,
+                navigation_health=navigation_health,
             )
 
