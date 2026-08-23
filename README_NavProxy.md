@@ -86,3 +86,128 @@ The production scheduler continues to launch NAVProxy normally using the configu
 
 Scheduled Flight Executions are atomically claimed. A Flight Execution that has already been claimed by the scheduler or another launcher cannot be reused by the manual simulator launcher.
 
+```
+
+## RabbitMQ Telemetry Collector
+
+NAVProxy publishes normalized flight telemetry to RabbitMQ during flight execution. The MQ Collector is a development and diagnostic utility that consumes these telemetry messages so the NAVProxy telemetry stream can be observed directly.
+
+Telemetry is published using the following RabbitMQ topology:
+
+```text
+Host:        rabbitmq.dronenav.org
+Port:        5671 (AMQPS/TLS)
+Virtual host: prototype
+Exchange:    dronenav.telemetry
+Routing key: telemetry.raw
+Queue:       dronenav.telemetry.raw
+```
+
+### Starting the MQ Collector
+
+From the root of the DroneNav API project:
+
+```bash
+python -m app.navproxy.tooling.consume_telemetry
+```
+
+The collector connects to RabbitMQ and consumes messages from:
+
+```text
+dronenav.telemetry.raw
+```
+
+When successfully connected, it reports:
+
+```text
+Consuming telemetry from dronenav.telemetry.raw. Press Ctrl+C to stop.
+```
+
+Leave the collector running while executing a simulator or MAVLink/SITL flight.
+
+Stop the collector with:
+
+```text
+Ctrl+C
+```
+
+### RabbitMQ Credentials
+
+The collector uses application credentials supplied through environment variables. RabbitMQ administrative credentials must not be used by NAVProxy or the telemetry collector.
+
+The appropriate telemetry consumer credentials must be available in the runtime environment before starting the collector.
+
+Credentials must not be committed to the DroneNav repository.
+
+### Telemetry Output
+
+Each consumed message represents a normalized NAVProxy telemetry observation associated with a Flight Execution and Flight Log.
+
+Telemetry currently includes fields such as:
+
+```text
+flight_execution_id
+flight_id
+recorded_at
+
+telemetry:
+    latitude
+    longitude
+    relative_altitude_ft
+    absolute_altitude_ft
+    armed
+    heartbeat_active
+    mission_sequence
+    battery_percent
+    navigation_health
+    vehicle_health
+```
+
+The telemetry values exposed through RabbitMQ are DroneNav-normalized values. Flight-controller-specific interpretation is performed by the appropriate flight-controller adapter before the telemetry message is published.
+
+For example, the ArduPilot adapter converts native MAVLink heartbeat, battery, and navigation information into the platform-neutral telemetry semantics consumed by NAVProxy.
+
+### Development Use
+
+The MQ Collector is currently intended primarily for development, integration testing, and telemetry inspection.
+
+A typical SITL test workflow is:
+
+```text
+1. Start ArduPilot SITL.
+2. Start the MQ Collector.
+3. Launch or schedule a Flight Execution.
+4. Observe telemetry messages during the flight.
+5. Verify aircraft and NAVProxy state transitions.
+6. Stop the collector with Ctrl+C when testing is complete.
+```
+
+The collector is useful for validating telemetry such as:
+
+```text
+armed
+battery_percent
+navigation_health
+mission_sequence
+position
+altitude
+```
+
+For example, during a normal SITL flight the `armed` state should transition approximately as follows:
+
+```text
+before launch  -> false
+in flight      -> true
+after landing  -> false
+```
+
+### Queue Consumption
+
+The MQ Collector is a real RabbitMQ consumer, not a passive queue viewer.
+
+Messages successfully consumed and acknowledged by the collector are removed from the queue. Therefore, starting the collector against a queue containing previously accumulated telemetry will consume those queued messages.
+
+The collector should consequently be treated as a development consumer of the telemetry stream rather than as a permanent telemetry storage mechanism.
+
+Long-term telemetry persistence and analysis are separate concerns from RabbitMQ transport.
+
