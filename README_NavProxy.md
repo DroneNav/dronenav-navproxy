@@ -86,7 +86,6 @@ The production scheduler continues to launch NAVProxy normally using the configu
 
 Scheduled Flight Executions are atomically claimed. A Flight Execution that has already been claimed by the scheduler or another launcher cannot be reused by the manual simulator launcher.
 
-```
 
 ## RabbitMQ Telemetry Collector
 
