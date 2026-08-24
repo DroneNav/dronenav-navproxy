@@ -50,11 +50,9 @@ def validate_position_command(
 
     expected_latitude = float(parameters["latitude"])
     expected_longitude = float(parameters["longitude"])
-    expected_altitude = float(parameters["altitude_meters"])
 
     actual_latitude = float(downloaded_item["latitude"])
     actual_longitude = float(downloaded_item["longitude"])
-    actual_altitude = float(downloaded_item["altitude"])
 
     if abs(actual_latitude - expected_latitude) > coordinate_tolerance_degrees:
         raise ScheduledMissionValidationError(
@@ -70,12 +68,16 @@ def validate_position_command(
             f"expected {expected_longitude}, received {actual_longitude}."
         )
 
-    if abs(actual_altitude - expected_altitude) > altitude_tolerance_meters:
-        raise ScheduledMissionValidationError(
-            "Programmed mission altitude does not match compiled mission. "
-            f"Sequence {expected_item['sequence']}: "
-            f"expected {expected_altitude} m, received {actual_altitude} m."
-        )
+    if "altitude_meters" in parameters:
+        expected_altitude = float(parameters["altitude_meters"])
+        actual_altitude = float(downloaded_item["altitude"])
+
+        if abs(actual_altitude - expected_altitude) > altitude_tolerance_meters:
+            raise ScheduledMissionValidationError(
+                "Programmed mission altitude does not match compiled mission. "
+                f"Sequence {expected_item['sequence']}: "
+                f"expected {expected_altitude} m, received {actual_altitude} m."
+            )
 
 
 def validate_speed_command(

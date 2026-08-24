@@ -1143,6 +1143,13 @@ def interpret_flight_execution(
         failsafe_branches=failsafe_branches,
     )
 
+    failsafe_jump_map = build_failsafe_jump_map(
+        mission_items=mission_items,
+        route_waypoint_ranges=route_waypoint_ranges,
+        route_conformance_segments=route_conformance_segments,
+        failsafe_branches=failsafe_branches,
+    )
+
     return {
         "flight_execution_id": flight_execution_id,
         "assertions": assertions,
@@ -1155,6 +1162,7 @@ def interpret_flight_execution(
             "route_transitions": route_transitions,
             "route_speed_limits": route_speed_limits,
             "failsafe_branches": failsafe_branches,
+            "failsafe_jump_map": failsafe_jump_map,
             "arrival_transition": arrival_transition,
             "mission_items": mission_items,
         },
@@ -1449,6 +1457,135 @@ def build_failsafe_branches(
         )
 
     return branches
+
+
+def build_failsafe_jump_map(
+    mission_items: list[dict[str, Any]],
+    route_waypoint_ranges: list[dict[str, int]],
+    route_conformance_segments: list[dict[str, Any]],
+    failsafe_branches: list[dict[str, Any]],
+) -> list[dict[str, int]]:
+    """Build compressed NAV mission-index ranges for failsafe recovery."""
+
+    segment_to_recovery: dict[int, int] = {}
+
+    for branch in failsafe_branches:
+        recovery_mission_sequence = branch.get(
+            "mission_sequence"
+        )
+
+        if not isinstance(recovery_mission_sequence, int):
+            raise FlightExecutionCompileError(
+                "Failsafe branch is missing mission_sequence."
+            )
+
+        for flat_segment_index in branch["route_segment_indexes"]:
+            segment_to_recovery[flat_segment_index] = (
+                recovery_mission_sequence
+            )
+
+    nav_assignments: list[tuple[int, int]] = []
+
+    for item in mission_items:
+        if item.get("command") != "MAV_CMD_NAV_WAYPOINT":
+            continue
+
+        waypoint_index = item.get("waypoint_index")
+
+        if not isinstance(waypoint_index, int):
+            continue
+
+        flat_segment_index = None
+
+        for waypoint_range in route_waypoint_ranges:
+            if (
+                waypoint_range["start_waypoint_index"]
+                <= waypoint_index
+                <= waypoint_range["end_waypoint_index"]
+            ):
+                route_index = waypoint_range["route_index"]
+
+                route_waypoint_index = (
+                    waypoint_index
+                    - waypoint_range["start_waypoint_index"]
+                )
+
+                route_segment_index = max(
+                    0,
+                    route_waypoint_index - 1,
+                )
+
+                for index, segment in enumerate(
+                    route_conformance_segments
+                ):
+                    if (
+                        segment["route_index"] == route_index
+                        and segment["route_segment_index"]
+                        == route_segment_index
+                    ):
+                        flat_segment_index = index
+                        break
+
+                break
+
+        if flat_segment_index is None:
+            raise FlightExecutionCompileError(
+                "Internal compiler consistency error: "
+                "NAV waypoint could not be mapped to a Route segment."
+            )
+
+        recovery_mission_sequence = segment_to_recovery.get(
+            flat_segment_index
+        )
+
+        if recovery_mission_sequence is None:
+            raise FlightExecutionCompileError(
+                "Internal compiler consistency error: "
+                "Route segment has no compiled failsafe recovery branch."
+            )
+
+        nav_assignments.append((
+            item["sequence"],
+            recovery_mission_sequence,
+        ))
+
+    if not nav_assignments:
+        return []
+
+    jump_map: list[dict[str, int]] = []
+
+    range_start = 0
+    current_recovery = nav_assignments[0][1]
+
+    for mission_sequence, recovery_mission_sequence in nav_assignments[1:]:
+        if recovery_mission_sequence == current_recovery:
+            continue
+
+        jump_map.append({
+            "start_mission_sequence": range_start,
+            "end_mission_sequence": mission_sequence - 1,
+            "recovery_mission_sequence": current_recovery,
+        })
+
+        range_start = mission_sequence
+        current_recovery = recovery_mission_sequence
+
+    first_failsafe_sequence = min(
+        branch["mission_sequence"]
+        for branch in failsafe_branches
+    )
+
+    final_happy_path_sequence = (
+        first_failsafe_sequence - 2
+    )
+
+    jump_map.append({
+        "start_mission_sequence": range_start,
+        "end_mission_sequence": final_happy_path_sequence,
+        "recovery_mission_sequence": current_recovery,
+    })
+
+    return jump_map
 
 
 def parse_arguments() -> argparse.Namespace:
