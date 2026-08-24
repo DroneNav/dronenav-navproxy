@@ -65,3 +65,26 @@ def navigation_health_from_gps(
     return "healthy"
 
 
+def vehicle_health_from_sys_status(
+    message,
+) -> str | None:
+    """Normalize ArduPilot SYS_STATUS sensor health into DroneNav vehicle health."""
+
+    enabled = int(
+        message.onboard_control_sensors_enabled
+    )
+
+    healthy = int(
+        message.onboard_control_sensors_health
+    )
+
+    if enabled == 0:
+        return None
+
+    unhealthy_enabled = enabled & ~healthy
+
+    if unhealthy_enabled:
+        return "degraded"
+
+    return "healthy"
+

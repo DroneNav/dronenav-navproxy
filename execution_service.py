@@ -50,6 +50,12 @@ from .tooling.fer_compiler import (
     load_and_compile_flight_execution,
     load_flight_bands,
 )
+from app.navproxy.failsafe import (
+    evaluate_failsafe,
+    get_failsafe_coordinate_for_segment,
+    get_failsafe_mission_sequence_for_segment,
+    is_failsafe_mission_sequence,
+)
 from app.navproxy.scheduled_mission_validator import (
     normalize_ardupilot_mission_sequence,
     validate_programmed_scheduled_mission,
@@ -278,6 +284,63 @@ def run_navproxy_process(
                 telemetry=telemetry,
             )
 
+            failsafe_decision = evaluate_failsafe(
+                telemetry
+            )
+
+            if (
+                failsafe_decision.action == "continue"
+                and context.active_failsafe_action is not None
+            ):
+                context = replace(
+                    context,
+                    active_failsafe_action=None,
+                )
+
+            if (
+                NAVPROXY_FC_MODE == "mavlink"
+                and telemetry.mission_sequence is not None
+            ):
+                normalized_sequence = (
+                    normalize_ardupilot_mission_sequence(
+                        telemetry.mission_sequence
+                    )
+                )
+
+                if (
+                    context.active_operational_element
+                    != "failsafe_recovery"
+                    and is_failsafe_mission_sequence(
+                        context.compiler_ir,
+                        normalized_sequence,
+                    )
+                ):
+                    context = replace(
+                        context,
+                        active_operational_element="failsafe_recovery",
+                    )
+
+                    LOGGER.warning(
+                        "Failsafe recovery mission branch active: "
+                        "sequence=%s",
+                        telemetry.mission_sequence,
+                    )
+
+                    append_flight_log(
+                        context=context,
+                        lifecycle_phase="in_flight",
+                        event_type="Failsafe Recovery Active",
+                        event_status="Warning",
+                        message=(
+                            "Flight controller entered the preloaded "
+                            "failsafe recovery LAND branch."
+                        ),
+                        details={
+                            "fc_mission_sequence": (telemetry.mission_sequence),
+                            "dronenav_mission_sequence": (normalized_sequence),
+                        },
+                    )
+
             LOGGER.debug(
                 "Telemetry: lat=%s lon=%s alt_ft=%s armed=%s heartbeat=%s sequence=%s",
                 telemetry.latitude,
@@ -312,8 +375,10 @@ def run_navproxy_process(
             ):
                 continue
 
+
             if (
-                context.active_operational_element == "arrival_transition"
+                context.active_operational_element
+                in {"arrival_transition", "failsafe_recovery"}
                 and not telemetry.armed
             ):
                 context = replace(
@@ -407,6 +472,85 @@ def run_navproxy_process(
                         context.compiler_ir,
                         context.active_route_segment_index,
                     )
+
+            if (
+                failsafe_decision.action == "abort_to_failsafe"
+                and context.active_failsafe_action != "abort_to_failsafe"
+                and segment is not None
+            ):
+                failsafe_coordinate = get_failsafe_coordinate_for_segment(
+                    context.compiler_ir,
+                    segment,
+                )
+
+                failsafe_mission_sequence = (
+                    get_failsafe_mission_sequence_for_segment(
+                        context.compiler_ir,
+                        segment,
+                    )
+                )
+
+                LOGGER.warning(
+                    "Observed failsafe decision: "
+                    "action=%s reason=%s "
+                    "route_segment_index=%s "
+                    "failsafe_coordinate=%s "
+                    "failsafe_mission_sequence=%s",
+                    failsafe_decision.action,
+                    failsafe_decision.reason,
+                    context.active_route_segment_index,
+                    failsafe_coordinate,
+                    failsafe_mission_sequence,
+                )
+
+                append_flight_log(
+                    context=context,
+                    lifecycle_phase="in_flight",
+                    event_type="Failsafe Triggered",
+                    event_status="Warning",
+                    message=failsafe_decision.reason,
+                    details={
+                        "action": failsafe_decision.action,
+                        "route_segment_index": (context.active_route_segment_index),
+                        "failsafe_coordinate": failsafe_coordinate,
+                        "failsafe_mission_sequence": (failsafe_mission_sequence),
+                    },
+                )
+
+                context = replace(
+                    context,
+                    active_failsafe_action="abort_to_failsafe",
+                )
+
+            if (
+                failsafe_decision.action == "land_now"
+                and context.active_failsafe_action != "land_now"
+            ):
+                LOGGER.warning(
+                    "Observed failsafe decision: "
+                    "action=%s reason=%s "
+                    "route_segment_index=%s",
+                    failsafe_decision.action,
+                    failsafe_decision.reason,
+                    context.active_route_segment_index,
+                )
+
+                append_flight_log(
+                    context=context,
+                    lifecycle_phase="in_flight",
+                    event_type="Failsafe Triggered",
+                    event_status="Warning",
+                    message=failsafe_decision.reason,
+                    details={
+                        "action": failsafe_decision.action,
+                        "route_segment_index": (context.active_route_segment_index),
+                    },
+                )
+
+                context = replace(
+                    context,
+                    active_failsafe_action="land_now",
+                )
 
             if (
                 context.active_operational_element == "route"
@@ -607,6 +751,29 @@ def run_navproxy_process(
         context,
         postflight_result,
     )
+
+    if (
+        postflight_result.status
+        == constants.PostflightStatus.RECOVERED
+    ):
+        complete_scheduled_flight_execution(
+            context.flight_execution_id,
+            datetime.now(timezone.utc),
+        )
+
+        notify_flight_plan_status(
+            flight_execution_id=context.flight_execution_id,
+            status=FLIGHT_PLAN_STATUS_COMPLETED,
+        )
+
+        LOGGER.warning(
+            "NAVProxy execution completed via failsafe recovery: "
+            "execution=%s flight=%s",
+            context.flight_execution_id,
+            context.flight_id,
+        )
+
+        return
 
     if (
         postflight_result.status
@@ -1047,6 +1214,13 @@ def execute_postflight(
     if context.compiler_ir is None:
         raise ValueError(
             "Flight process context is missing the compiler IR."
+        )
+
+    if context.active_operational_element == "failsafe_recovery":
+        return PostflightResult(
+            flight_execution_uuid=context.flight_execution_id,
+            status=constants.PostflightStatus.RECOVERED,
+            assertion_results=(),
         )
 
     assertion_results: list[AssertionResult] = []
@@ -1749,6 +1923,28 @@ def record_postflight_result(
     result: PostflightResult,
 ) -> str:
     """Append the final post-flight assertion result."""
+
+    if result.status == constants.PostflightStatus.RECOVERED:
+        flight_log_id = append_flight_log(
+            context=context,
+            lifecycle_phase="post_flight",
+            event_type="postflight_recovered",
+            event_status="completed",
+            message=(
+                "Flight completed via failsafe recovery landing."
+            ),
+            details={
+                "assertion_count": 0,
+            },
+        )
+
+        LOGGER.info(
+            "Post-flight recovered: flight=%s log_entry=%s",
+            context.flight_id,
+            flight_log_id,
+        )
+
+        return flight_log_id
 
     passed = (
         result.status

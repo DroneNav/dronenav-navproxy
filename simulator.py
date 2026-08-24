@@ -23,6 +23,7 @@ class TelemetryReading:
     absolute_altitude_ft: float | None = None
 
     battery_percent: float | None = None
+    energy_health: str | None = None
     navigation_health: str | None = None
     vehicle_health: str | None = None
 

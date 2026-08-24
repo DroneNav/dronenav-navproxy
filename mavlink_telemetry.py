@@ -19,6 +19,7 @@ from app.navproxy.fc_adapters.ardupilot import (
     battery_percent_from_sys_status,
     is_flight_controller_heartbeat,
     navigation_health_from_gps,
+    vehicle_health_from_sys_status,
 )
 
 
@@ -203,6 +204,7 @@ class MavlinkTelemetrySource:
         gps_eph: int | None = None
         gps_epv: int | None = None
         navigation_health: str | None = None
+        vehicle_health: str | None = None
 
         while True:
             if heartbeat_lost_at is not None:
@@ -212,6 +214,7 @@ class MavlinkTelemetrySource:
                     mission_sequence = None
                     battery_percent = None
                     navigation_health = None
+                    vehicle_health = None
                     continue
 
                 recovery_age = (
@@ -290,6 +293,9 @@ class MavlinkTelemetrySource:
                 battery_percent = battery_percent_from_sys_status(
                     message
                 )
+                vehicle_health = vehicle_health_from_sys_status(
+                    message
+                )
                 continue
 
             if message_type == "GPS_RAW_INT":
@@ -324,5 +330,6 @@ class MavlinkTelemetrySource:
                 mission_sequence=mission_sequence,
                 battery_percent=battery_percent,
                 navigation_health=navigation_health,
+                vehicle_health=vehicle_health,
             )
 

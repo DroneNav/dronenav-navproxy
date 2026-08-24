@@ -758,6 +758,7 @@ def build_mission_items(
     route_speed_limits: list[dict[str, Any]],
     minimum_agl_ft: int | float,
     arrival_assertion: dict[str, Any],
+    failsafe_branches: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Build the ordered DroneNav mission stream."""
 
@@ -881,6 +882,22 @@ def build_mission_items(
         },
     })
 
+    for branch in failsafe_branches:
+        coordinate = branch["coordinate"]
+
+        sequence = len(mission_items)
+
+        mission_items.append({
+            "sequence": sequence,
+            "command": "MAV_CMD_NAV_LAND",
+            "parameters": {
+                "latitude": coordinate[1],
+                "longitude": coordinate[0],
+            },
+        })
+
+        branch["mission_sequence"] = sequence
+
     return mission_items
 
 
@@ -990,6 +1007,7 @@ def build_route_conformance_segments(
                 "route_width_ft": attributes["route_width_ft"],
                 "speed_limit_mph": attributes["speed_limit_mph"],
                 "ground_elevation_ft": attributes["ground_elevation_ft"],
+                "failsafe_coordinate": attributes.get("failsafe_coordinate"),
             })
 
     return conformance_segments
@@ -1091,6 +1109,14 @@ def interpret_flight_execution(
         route_assertions
     )
 
+    launch_parameters = launch_assertion["parameters"]
+    departure_coordinate = launch_parameters["coordinate"]
+
+    failsafe_branches = build_failsafe_branches(
+        route_conformance_segments,
+        departure_coordinate,
+    )
+
     route_transitions = build_route_transitions(
         route_assertions
     )
@@ -1114,6 +1140,7 @@ def interpret_flight_execution(
         route_speed_limits=route_speed_limits,
         minimum_agl_ft=minimum_agl_ft,
         arrival_assertion=arrival_assertion,
+        failsafe_branches=failsafe_branches,
     )
 
     return {
@@ -1127,6 +1154,7 @@ def interpret_flight_execution(
             "departure_transition": departure_transition,
             "route_transitions": route_transitions,
             "route_speed_limits": route_speed_limits,
+            "failsafe_branches": failsafe_branches,
             "arrival_transition": arrival_transition,
             "mission_items": mission_items,
         },
@@ -1379,6 +1407,48 @@ def get_coordinate_distance_ft(
         )
 
     return float(distance_ft)
+
+
+def build_failsafe_branches(
+    route_conformance_segments: list[dict[str, Any]],
+    departure_coordinate: list[float],
+) -> list[dict[str, Any]]:
+    """Build unique failsafe recovery branches and segment assignments."""
+
+    branches: list[dict[str, Any]] = []
+    branch_indexes: dict[tuple[float, float], int] = {}
+
+    for flat_segment_index, segment in enumerate(route_conformance_segments):
+        coordinate = segment.get("failsafe_coordinate")
+
+        if coordinate is None:
+            coordinate = departure_coordinate
+
+        coordinate_key = (
+            float(coordinate[0]),
+            float(coordinate[1]),
+        )
+
+        branch_index = branch_indexes.get(coordinate_key)
+
+        if branch_index is None:
+            branch_index = len(branches)
+            branch_indexes[coordinate_key] = branch_index
+
+            branches.append({
+                "branch_index": branch_index,
+                "coordinate": [
+                    coordinate_key[0],
+                    coordinate_key[1],
+                ],
+                "route_segment_indexes": [],
+            })
+
+        branches[branch_index]["route_segment_indexes"].append(
+            flat_segment_index
+        )
+
+    return branches
 
 
 def parse_arguments() -> argparse.Namespace:
