@@ -56,6 +56,9 @@ from app.navproxy.failsafe import (
     get_failsafe_mission_sequence_for_segment,
     is_failsafe_mission_sequence,
 )
+from app.navproxy.fc_adapters.ardupilot_failsafe_recovery import (
+    program_failsafe_recovery_map,
+)
 from app.navproxy.scheduled_mission_validator import (
     normalize_ardupilot_mission_sequence,
     validate_programmed_scheduled_mission,
@@ -216,6 +219,11 @@ def run_navproxy_process(
         )
 
         validate_programmed_scheduled_mission(
+            connection=connection,
+            compiler_ir=context.compiler_ir,
+        )
+
+        program_failsafe_recovery_map(
             connection=connection,
             compiler_ir=context.compiler_ir,
         )
