@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import ssl
-from datetime import datetime, timezone
 from typing import Any
 
 import pika
@@ -43,19 +42,18 @@ def build_telemetry_message(
     return {
         "flight_execution_id": flight_execution_id,
         "flight_id": flight_id,
-        "recorded_at": datetime.now(timezone.utc).isoformat(),
-        "telemetry": {
-            "latitude": telemetry.latitude,
-            "longitude": telemetry.longitude,
-            "relative_altitude_ft": telemetry.relative_altitude_ft,
-            "armed": telemetry.armed,
-            "heartbeat_active": telemetry.heartbeat_active,
-            "mission_sequence": telemetry.mission_sequence,
-            "battery_percent": telemetry.battery_percent,
-            "energy_health": telemetry.energy_health,
-            "navigation_health": telemetry.navigation_health,
-            "vehicle_health": telemetry.vehicle_health,
-        },
+        "observed_at": telemetry.observed_at.isoformat(),
+        "latitude": telemetry.latitude,
+        "longitude": telemetry.longitude,
+        "relative_altitude_ft": telemetry.relative_altitude_ft,
+        "absolute_altitude_ft": telemetry.absolute_altitude_ft,
+        "armed": telemetry.armed,
+        "heartbeat_active": telemetry.heartbeat_active,
+        "mission_sequence": telemetry.mission_sequence,
+        "battery_percent": telemetry.battery_percent,
+        "energy_health": telemetry.energy_health,
+        "navigation_health": telemetry.navigation_health,
+        "vehicle_health": telemetry.vehicle_health,
     }
 
 

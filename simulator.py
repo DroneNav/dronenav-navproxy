@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import logging
 import time
 from typing import Any, Iterator
+from datetime import datetime, timedelta, timezone
 
 
 LOGGER = logging.getLogger(__name__)
@@ -14,6 +15,7 @@ LOGGER = logging.getLogger(__name__)
 class TelemetryReading:
     """One simulated radio telemetry observation."""
 
+    observed_at: datetime
     latitude: float
     longitude: float
     relative_altitude_ft: float
@@ -91,6 +93,24 @@ class FlightSimulator:
                 "Compiler IR mission is missing the mission_items array."
             )
 
+        waypoint_items = [
+            item
+            for item in mission_items
+            if (
+                isinstance(item, dict)
+                and item.get("command") == "MAV_CMD_NAV_WAYPOINT"
+            )
+        ]
+
+        flight_sample_count = len(waypoint_items) + 2
+
+        sample_interval_seconds = (
+            self.flight_seconds / max(flight_sample_count, 1)
+        )
+
+        simulated_start_at = datetime.now(timezone.utc)
+        sample_index = 0
+
         launch_assertion = next(
             (
                 assertion
@@ -128,12 +148,16 @@ class FlightSimulator:
         launch_latitude = launch_coordinate[1]
 
         yield TelemetryReading(
+            observed_at=(simulated_start_at + timedelta(seconds=(sample_index * sample_interval_seconds))),
             latitude=launch_latitude,
             longitude=launch_longitude,
             relative_altitude_ft=0.0,
             armed=False,
             heartbeat_active=True,
+            battery_percent=max(0.0, 100.0 - (sample_index * 2.0)),
         )
+
+        sample_index += 1
 
         for mission_item in mission_items:
             if not isinstance(mission_item, dict):
@@ -153,13 +177,17 @@ class FlightSimulator:
                 continue
 
             yield TelemetryReading(
+                observed_at=(simulated_start_at + timedelta(seconds=(sample_index * sample_interval_seconds))),
                 latitude=launch_latitude,
                 longitude=launch_longitude,
                 relative_altitude_ft=float(mission["minimum_agl_ft"]),
                 armed=True,
                 heartbeat_active=True,
+                battery_percent=max(0.0, 100.0 - (sample_index * 2.0)),
                 mission_sequence=mission_item.get("sequence"),
             )
+
+            sample_index += 1
 
             break
 
@@ -187,13 +215,17 @@ class FlightSimulator:
                 continue
 
             yield TelemetryReading(
+                observed_at=(simulated_start_at + timedelta(seconds=(sample_index * sample_interval_seconds))),
                 latitude=latitude,
                 longitude=longitude,
                 relative_altitude_ft=float(mission["minimum_agl_ft"]),
                 armed=True,
                 heartbeat_active=True,
+                battery_percent=max(0.0, 100.0 - (sample_index * 2.0)),
                 mission_sequence=mission_item.get("sequence"),
             )
+
+            sample_index += 1
 
         for mission_item in mission_items:
             if not isinstance(mission_item, dict):
@@ -217,20 +249,26 @@ class FlightSimulator:
                 continue
 
             yield TelemetryReading(
+                observed_at=(simulated_start_at + timedelta(seconds=(sample_index * sample_interval_seconds))),
                 latitude=latitude,
                 longitude=longitude,
                 relative_altitude_ft=0.0,
                 armed=True,
                 heartbeat_active=True,
+                battery_percent=max(0.0, 100.0 - (sample_index * 2.0)),
                 mission_sequence=mission_item.get("sequence"),
             )
 
+            sample_index += 1
+
             yield TelemetryReading(
+                observed_at=(simulated_start_at + timedelta(seconds=(sample_index * sample_interval_seconds))),
                 latitude=latitude,
                 longitude=longitude,
                 relative_altitude_ft=0.0,
                 armed=False,
                 heartbeat_active=True,
+                battery_percent=max(0.0, 100.0 - (sample_index * 2.0)),
                 mission_sequence=mission_item.get("sequence"),
             )
 

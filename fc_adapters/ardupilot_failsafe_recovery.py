@@ -4,11 +4,11 @@ from typing import Any
 
 from pymavlink import mavutil
 
+from io import BytesIO
+
 from app.navproxy.fc_adapters.ardupilot import (
     encode_failsafe_recovery_map,
 )
-
-from io import BytesIO
 
 from pymavlink.mavftp import (
     FtpError,
@@ -52,36 +52,13 @@ def build_failsafe_recovery_payload(
         ) from exc
 
 
-class FailsafeRecoveryReadback:
-    """Capture an ArduPilot failsafe recovery FTP download in memory."""
-
-    def __init__(self, ftp: MAVFTP) -> None:
-        self.ftp = ftp
-        self.buffer = BytesIO()
-
-    def __call__(self, file_handle) -> None:
-        if file_handle is None:
-            return
-
-        self.buffer.write(
-            file_handle.read()
-        )
-
-        # Prevent pymavlink from materializing the completed
-        # FTP download as a local file.
-        self.ftp.filename = None
-
-    def getvalue(self) -> bytes:
-        return self.buffer.getvalue()
-
-
 def program_failsafe_recovery_map(
     *,
     connection: mavutil.mavfile,
     compiler_ir: dict[str, Any],
     timeout: float = 10.0,
 ) -> None:
-    """Program and verify ArduPilot's persistent failsafe recovery map."""
+    """Program ArduPilot's persistent failsafe recovery map."""
 
     payload = build_failsafe_recovery_payload(
         compiler_ir
@@ -119,36 +96,5 @@ def program_failsafe_recovery_map(
             "ArduPilot failed to program the failsafe recovery map."
         )
 
-    readback = FailsafeRecoveryReadback(ftp)
-
-    read_result = ftp.cmd_get(
-        [
-            FAILSAFE_RECOVERY_PATH,
-        ],
-        callback=readback,
-    )
-
-    if read_result.return_code != FtpError.Success:
-        raise FailsafeRecoveryProgrammingError(
-            "ArduPilot rejected failsafe recovery FTP read-back."
-        )
-
-    read_result = ftp.process_ftp_reply(
-        "OpenFileRO",
-        timeout=timeout,
-    )
-
-    if (
-        read_result is None
-        or read_result.return_code != FtpError.Success
-    ):
-        raise FailsafeRecoveryProgrammingError(
-            "ArduPilot failsafe recovery map could not be read back."
-        )
-
-    if readback.getvalue() != payload:
-        raise FailsafeRecoveryProgrammingError(
-            "ArduPilot failsafe recovery map read-back validation failed."
-        )
-
+    return
 

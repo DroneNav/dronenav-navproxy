@@ -8,6 +8,8 @@ from typing import Iterator
 
 from pymavlink import mavutil
 
+from datetime import datetime, timezone
+
 from app.navproxy.simulator import TelemetryReading
 
 from app.config.constants import (
@@ -317,6 +319,7 @@ class MavlinkTelemetrySource:
                 continue
 
             yield TelemetryReading(
+                observed_at=datetime.now(timezone.utc),
                 latitude=int(message.lat) / 10_000_000,
                 longitude=int(message.lon) / 10_000_000,
                 relative_altitude_ft=(

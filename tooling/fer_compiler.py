@@ -660,8 +660,52 @@ def build_route_waypoint_ranges(
     return ranges
 
 
-def build_route_speed_limits(
-    route_assertions: list[dict[str, Any]],
+def insert_segment_speed_changes(
+    mission_items: list[dict[str, Any]],
+    route_conformance_segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Insert speed changes whenever the governed segment speed changes."""
+
+    if not route_conformance_segments:
+        return mission_items
+
+    inserted_count = 0
+    active_speed_mph = None
+
+    for flat_segment_index, segment in enumerate(
+        route_conformance_segments
+    ):
+        speed_limit_mph = segment["speed_limit_mph"]
+
+        if speed_limit_mph == active_speed_mph:
+            continue
+
+        # Mission item 0 is TAKEOFF.
+        #
+        # Each flattened Route segment begins at waypoint
+        # flat_segment_index + 1. Insert the speed command
+        # immediately before that segment begins.
+        insert_index = (
+            flat_segment_index
+            + 1
+            + inserted_count
+        )
+
+        mission_items.insert(
+            insert_index,
+            build_change_speed_item(speed_limit_mph),
+        )
+
+        inserted_count += 1
+        active_speed_mph = speed_limit_mph
+
+    for sequence, item in enumerate(mission_items):
+        item["sequence"] = sequence
+
+    return mission_items
+
+
+def build_route_speed_limits(route_assertions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Return the entry and exit speed limits for each ordered Route."""
 
@@ -860,16 +904,10 @@ def build_mission_items(
             },
         })
 
-    mission_items = insert_initial_route_speed(
+    mission_items = insert_segment_speed_changes(
         mission_items,
         route_conformance_segments,
-    )
-
-    mission_items = insert_route_transition_speeds(
-        mission_items,
         route_waypoint_ranges,
-        route_speed_limits,
-        initial_speed_inserted=True,
     )
 
     mission_items.append({
@@ -1239,83 +1277,61 @@ def build_transition_coordinate(
     ]
 
 
-def insert_initial_route_speed(
+def insert_segment_speed_changes(
     mission_items: list[dict[str, Any]],
     route_conformance_segments: list[dict[str, Any]],
+    route_waypoint_ranges: list[dict[str, int]],
 ) -> list[dict[str, Any]]:
-    """Insert the initial Route cruise speed after the first Route segment."""
+    """Insert a speed command whenever the governed segment speed changes."""
 
     if not route_conformance_segments:
         return mission_items
 
-    first_speed_limit_mph = (
-        route_conformance_segments[0]["speed_limit_mph"]
-    )
+    route_start_waypoints = {
+        route_range["route_index"]: route_range["start_waypoint_index"]
+        for route_range in route_waypoint_ranges
+    }
 
-    speed_item = build_change_speed_item(
-        first_speed_limit_mph
-    )
+    speed_changes: list[tuple[int, int | float]] = []
+    active_speed_mph = None
 
-    # TAKEOFF is sequence 0.
-    # Waypoint 1 enters the first Route.
-    # Waypoint 2 completes the first Route segment.
-    # Apply cruise speed after that point.
-    insert_index = 3
+    for segment in route_conformance_segments:
+        speed_limit_mph = segment["speed_limit_mph"]
 
-    mission_items.insert(
-        insert_index,
-        speed_item,
-    )
-
-    for sequence, item in enumerate(mission_items):
-        item["sequence"] = sequence
-
-    return mission_items
-
-def insert_route_transition_speeds(
-    mission_items: list[dict[str, Any]],
-    route_waypoint_ranges: list[dict[str, int]],
-    route_speed_limits: list[dict[str, Any]],
-    *,
-    initial_speed_inserted: bool,
-) -> list[dict[str, Any]]:
-    """Insert speed changes around Route-to-Route transitions."""
-
-    if len(route_waypoint_ranges) < 2:
-        return mission_items
-
-    inserted_count = 1 if initial_speed_inserted else 0
-
-    for route_index in range(len(route_waypoint_ranges) - 1):
-        current_speed = route_speed_limits[route_index][
-            "exit_speed_limit_mph"
-        ]
-        next_speed = route_speed_limits[route_index + 1][
-            "entry_speed_limit_mph"
-        ]
-
-        if next_speed == current_speed:
+        if speed_limit_mph == active_speed_mph:
             continue
 
-        current_range = route_waypoint_ranges[route_index]
-        next_range = route_waypoint_ranges[route_index + 1]
+        route_index = segment["route_index"]
+        route_segment_index = segment["route_segment_index"]
 
-        if next_speed < current_speed:
-            insert_index = (
-                current_range["end_waypoint_index"]
-                + 1
-                + inserted_count
+        start_waypoint_index = route_start_waypoints[route_index]
+        segment_start_waypoint_index = (
+            start_waypoint_index + route_segment_index
+        )
+
+        speed_changes.append(
+            (
+                segment_start_waypoint_index,
+                speed_limit_mph,
             )
-        else:
-            insert_index = (
-                next_range["start_waypoint_index"]
-                + 2
-                + inserted_count
-            )
+        )
+
+        active_speed_mph = speed_limit_mph
+
+    inserted_count = 0
+
+    for waypoint_index, speed_limit_mph in speed_changes:
+        # Mission item 0 is TAKEOFF, so waypoint N initially
+        # resides at mission index N + 1.
+        insert_index = (
+            waypoint_index
+            + 1
+            + inserted_count
+        )
 
         mission_items.insert(
             insert_index,
-            build_change_speed_item(next_speed),
+            build_change_speed_item(speed_limit_mph),
         )
 
         inserted_count += 1

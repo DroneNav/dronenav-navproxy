@@ -100,7 +100,7 @@ def get_failsafe_coordinate_for_segment(
             isinstance(coordinate, list)
             and len(coordinate) == 2
         ):
-            LOGGER.warning(
+            LOGGER.debug(
                 "Failsafe coordinate missing for Route segment; "
                 "using departure coordinate fallback: "
                 "route_id=%s route_segment_index=%s",

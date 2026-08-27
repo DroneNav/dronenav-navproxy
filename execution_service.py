@@ -50,6 +50,10 @@ from .tooling.fer_compiler import (
     load_and_compile_flight_execution,
     load_flight_bands,
 )
+from app.navproxy.route_timing_model import (
+    RouteTimingModel,
+)
+from app.navproxy.energy_health import EnergyHealthModel
 from app.navproxy.failsafe import (
     evaluate_failsafe,
     get_failsafe_coordinate_for_segment,
@@ -250,6 +254,12 @@ def run_navproxy_process(
 
     telemetry_publisher = TelemetryPublisher()
 
+    energy_health_model = EnergyHealthModel()
+
+    route_timing_model = RouteTimingModel(
+        context.compiler_ir,
+    )
+
     last_telemetry: TelemetryReading | None = None
 
     try:
@@ -285,6 +295,44 @@ def run_navproxy_process(
                         telemetry.mission_sequence,
                         route_segment_index,
                     )
+
+            segment = get_route_conformance_segment(
+                context.compiler_ir,
+                context.active_route_segment_index,
+            )
+
+            if (
+                segment is not None
+                and telemetry.battery_percent is not None
+            ):
+                current_coordinate = [
+                    telemetry.longitude,
+                    telemetry.latitude,
+                ]
+
+                seconds_to_destination = (
+                    route_timing_model.get_seconds_to_destination(
+                        context.active_route_segment_index,
+                    )
+                )
+
+                seconds_to_failsafe = (
+                    route_timing_model.get_seconds_to_failsafe(
+                        context.active_route_segment_index,
+                    )
+                )
+
+                energy_estimate = energy_health_model.update(
+                    observed_at=telemetry.observed_at,
+                    battery_percent=telemetry.battery_percent,
+                    seconds_to_destination=seconds_to_destination,
+                    seconds_to_failsafe=seconds_to_failsafe,
+                )
+
+                telemetry = replace(
+                    telemetry,
+                    energy_health=energy_estimate.health,
+                )
 
             telemetry_publisher.publish(
                 flight_execution_id=context.flight_execution_id,
