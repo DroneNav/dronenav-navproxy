@@ -92,8 +92,6 @@ def connect_vehicle(
 ) -> mavutil.mavfile:
     """Connect to the vehicle and wait for its heartbeat."""
 
-    print(f"Connecting to {connection_string}...")
-
     connection = mavutil.mavlink_connection(
         connection_string,
         autoreconnect=False,
@@ -107,12 +105,6 @@ def connect_vehicle(
         raise MissionUploadError(
             "Timed out waiting for a vehicle heartbeat."
         )
-
-    print(
-        "Heartbeat received from "
-        f"system {connection.target_system}, "
-        f"component {connection.target_component}."
-    )
 
     return connection
 
@@ -183,8 +175,6 @@ def upload_mission(
     upload_started_at = time.monotonic()
     count_attempts = 0
     sent_sequences: set[int] = set()
-
-    print(f"Beginning upload of {item_count} mission items.")
 
     send_mission_count(
         connection=connection,
@@ -263,11 +253,6 @@ def upload_mission(
             item_to_send["target_system"] = connection.target_system
             item_to_send["target_component"] = connection.target_component
             item_to_send["mission_type"] = mission_type
-
-            print(
-                f"Sending item {requested_sequence}/{item_count - 1}: "
-                f"command {item_to_send['command']}."
-            )
 
             send_mission_item_int(
                 connection=connection,

@@ -103,8 +103,6 @@ def connect_to_ardupilot(
 ) -> mavutil.mavfile:
     """Open a MAVLink connection and wait for ArduPilot's heartbeat."""
 
-    print(f"Connecting to {connection_string}...")
-
     try:
         connection = mavutil.mavlink_connection(
             connection_string,
