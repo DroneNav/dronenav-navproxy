@@ -157,7 +157,7 @@ def validate_scheduled_mission(
     *,
     compiler_ir: dict[str, Any],
     downloaded_items: list[dict[str, Any]],
-) -> None:
+) -> list[dict[str, Any]]:
     """Validate the programmed FC mission against scheduled mission semantics."""
 
     mission = compiler_ir["mission"]
@@ -265,13 +265,15 @@ def validate_scheduled_mission(
                 f"expected 1, received {downloaded_autocontinue}."
             )
 
+    return downloaded_items
+
 
 def validate_programmed_scheduled_mission(
     *,
     connection: mavutil.mavfile,
     compiler_ir: dict[str, Any],
     timeout: float = 5.0,
-) -> None:
+) -> list[dict[str, Any]]:
     """Read back and validate the scheduled mission programmed on the FC."""
 
     downloaded_items = download_mission(
@@ -279,9 +281,9 @@ def validate_programmed_scheduled_mission(
         timeout=timeout,
     )
 
-    validate_scheduled_mission(
-        compiler_ir=compiler_ir,
-        downloaded_items=downloaded_items,
-    )
+    return validate_scheduled_mission(
+               compiler_ir=compiler_ir,
+               downloaded_items=downloaded_items,
+           )
 
 

@@ -49,6 +49,7 @@ from .tooling.fer_compiler import (
     FlightExecutionCompileError,
     load_and_compile_flight_execution,
     load_flight_bands,
+    build_verified_route_mission_ranges,
 )
 from app.navproxy.route_timing_model import (
     RouteTimingModel,
@@ -79,6 +80,7 @@ from app.navproxy.tooling.upload_mission import (
 )
 from app.models.flight_execution_model import (
     complete_scheduled_flight_execution,
+    update_flight_execution_route_mission_ranges,
 )
 from .flight_band_resolver import resolve_applicable_flight_band
 
@@ -222,9 +224,21 @@ def run_navproxy_process(
             compiler_ir=context.compiler_ir,
         )
 
-        validate_programmed_scheduled_mission(
-            connection=connection,
+        verified_mission = validate_programmed_scheduled_mission(
+                               connection=connection,
+                               compiler_ir=context.compiler_ir,
+                           )
+
+        verified_route_ranges = build_verified_route_mission_ranges(
             compiler_ir=context.compiler_ir,
+            verified_mission=verified_mission,
+        )
+
+        update_flight_execution_route_mission_ranges(
+            flight_execution_id=(
+                context.compiler_ir["flight_execution_id"]
+            ),
+            route_ranges=verified_route_ranges,
         )
 
         program_failsafe_recovery_map(

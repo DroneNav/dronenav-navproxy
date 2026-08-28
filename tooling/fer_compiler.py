@@ -660,6 +660,79 @@ def build_route_waypoint_ranges(
     return ranges
 
 
+def build_verified_route_mission_ranges(
+    *,
+    compiler_ir: dict[str, Any],
+    verified_mission: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Build verified ArduPilot mission-sequence ranges for each Route.
+    """
+
+    route_waypoint_ranges = compiler_ir["mission"][
+        "route_waypoint_ranges"
+    ]
+
+    route_ranges: list[dict[str, Any]] = []
+
+    for route_range in route_waypoint_ranges:
+        route_index = route_range["route_index"]
+        start_waypoint_index = route_range[
+            "start_waypoint_index"
+        ]
+        end_waypoint_index = route_range[
+            "end_waypoint_index"
+        ]
+
+        route_sequences: list[int] = []
+
+        expected_items = compiler_ir["mission"][
+            "mission_items"
+        ]
+
+        if len(expected_items) != len(verified_mission):
+            raise ValueError(
+                "Verified mission item count does not match "
+                "compiler mission item count."
+            )
+
+        for expected_item, verified_item in zip(
+            expected_items,
+            verified_mission,
+        ):
+            waypoint_index = expected_item.get(
+                "waypoint_index"
+            )
+
+            if not isinstance(waypoint_index, int):
+                continue
+
+            if (
+                start_waypoint_index
+                <= waypoint_index
+                <= end_waypoint_index
+            ):
+                route_sequences.append(
+                    int(verified_item["seq"])
+                )
+
+        if not route_sequences:
+            raise ValueError(
+                "No verified mission items found for "
+                f"Route index {route_index}."
+            )
+
+        route_ranges.append(
+            {
+                "route_index": route_index,
+                "start_mission_sequence": min(route_sequences),
+                "end_mission_sequence": max(route_sequences),
+            }
+        )
+
+    return route_ranges
+
+
 def insert_segment_speed_changes(
     mission_items: list[dict[str, Any]],
     route_conformance_segments: list[dict[str, Any]],
