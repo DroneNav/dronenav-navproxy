@@ -82,9 +82,9 @@ def main() -> None:
 
                 process_telemetry(message)
 
-                """ channel.basic_ack(
+                channel.basic_ack(
                     delivery_tag=method.delivery_tag
-                )"""
+                )
 
             except Exception:
                 LOGGER.exception(
@@ -131,13 +131,13 @@ def get_fer_route_ranges(
     return route_ranges
 
 
-def get_route_id_for_mission_sequence(
+def get_route_for_mission_sequence(
     route_ranges: list[dict],
     mission_sequence: int,
 ):
-    """Return the Route ID containing the mission sequence."""
+    """Return the Route range containing the mission sequence."""
 
-    for route in route_ranges:
+    for index, route in enumerate(route_ranges):
         start_sequence = route.get(
             "start_mission_sequence"
         )
@@ -152,9 +152,15 @@ def get_route_id_for_mission_sequence(
             <= mission_sequence
             <= end_sequence
         ):
-            return route["route_id"]
+            previous_route = (
+                route_ranges[index - 1]
+                if index > 0
+                else None
+            )
 
-    return None
+            return route, previous_route
+
+    return None, None
 
 
 def process_telemetry(message: dict) -> None:
@@ -182,29 +188,65 @@ def process_telemetry(message: dict) -> None:
     if mission_sequence is None:
         return
 
-    route_id = get_route_id_for_mission_sequence(
+    route, previous_route = get_route_for_mission_sequence(
         route_ranges,
         int(mission_sequence),
     )
 
-    if route_id is None:
+    if route is None:
         return
 
+    route_id = route["route_id"]
+
+    previous_route_id = (
+        previous_route["route_id"]
+        if previous_route is not None
+        else None
+    )
+
+    final_route = route_ranges[-1]
+
+    is_final_route_exit = (
+        route_id == final_route["route_id"]
+        and int(mission_sequence)
+        == final_route["end_mission_sequence"]
+    )
+
+    current_route_state = (
+        "exited"
+        if is_final_route_exit
+        else "active"
+    )
+
+    current_route_exit_time = (
+        message["observed_at"]
+        if is_final_route_exit
+        else None
+    )
+
     with engine.begin() as connection:
+        if previous_route_id is not None:
+            update_route_occupancy_state(
+                connection,
+                route_id=previous_route_id,
+                flight_execution_id=flight_execution_id,
+                actual_exit_time=message["observed_at"],
+                state="exited",
+            )
+
         update_route_occupancy_state(
             connection,
             route_id=route_id,
             flight_execution_id=flight_execution_id,
             actual_entry_time=message["observed_at"],
+            actual_exit_time=current_route_exit_time,
+            last_latitude=message["latitude"],
+            last_longitude=message["longitude"],
+            last_altitude_ft=message["relative_altitude_ft"],
+            state=current_route_state,
         )
 
-    LOGGER.info(
-        "Telemetry route resolved: "
-        "FER=%s mission_sequence=%s route_id=%s",
-        flight_execution_id,
-        mission_sequence,
-        route_id,
-    )
+    return
 
 
 

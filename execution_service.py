@@ -445,7 +445,6 @@ def run_navproxy_process(
             ):
                 continue
 
-
             if (
                 context.active_operational_element
                 in {"arrival_transition", "failsafe_recovery"}
