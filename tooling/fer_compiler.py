@@ -685,6 +685,7 @@ def build_verified_route_mission_ranges(
         ]
 
         route_sequences: list[int] = []
+        segment_mission_sequences: list[int] = []
 
         expected_items = compiler_ir["mission"][
             "mission_items"
@@ -716,6 +717,23 @@ def build_verified_route_mission_ranges(
                     int(verified_item["seq"])
                 )
 
+                for segment in compiler_ir["mission"][
+                    "route_conformance_segments"
+                ]:
+                    if segment["route_index"] != route_index:
+                        continue
+
+                    segment_start_waypoint_index = (
+                        start_waypoint_index
+                        + segment["route_segment_index"]
+                    )
+
+                    if waypoint_index == segment_start_waypoint_index:
+                        segment_mission_sequences.append(
+                            int(verified_item["seq"])
+                        )
+                        break
+
         if not route_sequences:
             raise ValueError(
                 "No verified mission items found for "
@@ -727,6 +745,7 @@ def build_verified_route_mission_ranges(
                 "route_index": route_index,
                 "start_mission_sequence": min(route_sequences),
                 "end_mission_sequence": max(route_sequences),
+                "segment_mission_sequences": segment_mission_sequences,
             }
         )
 

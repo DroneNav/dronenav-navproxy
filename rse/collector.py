@@ -29,6 +29,7 @@ FER_ROUTE_RANGE_CACHE: dict[
 
 
 LOGGER = logging.getLogger(__name__)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -224,6 +225,30 @@ def process_telemetry(message: dict) -> None:
         else None
     )
 
+    segment_mission_sequences = route.get(
+        "segment_mission_sequences"
+    )
+
+    if (
+        not is_final_route_exit
+        and isinstance(segment_mission_sequences, list)
+        and segment_mission_sequences
+        and int(mission_sequence)
+        not in segment_mission_sequences
+    ):
+        return
+
+    last_processed_segment_sequence = route.get(
+        "_last_processed_segment_sequence"
+    )
+
+    if (
+        last_processed_segment_sequence is not None
+        and last_processed_segment_sequence
+        == int(mission_sequence)
+    ):
+        return
+
     with engine.begin() as connection:
         if previous_route_id is not None:
             update_route_occupancy_state(
@@ -245,6 +270,10 @@ def process_telemetry(message: dict) -> None:
             last_altitude_ft=message["relative_altitude_ft"],
             state=current_route_state,
         )
+
+    route["_last_processed_segment_sequence"] = int(
+        mission_sequence
+    )
 
     return
 
