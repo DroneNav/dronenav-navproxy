@@ -30,9 +30,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.config.constants import (
     DEFAULT_API_BASE_URL,
     DEFAULT_API_TIMEOUT_SECONDS,
-    TRANSITION_DIAMETER_FT,
-    MISSION_ALTITUDE_MARGIN_FT,
-)
+    TRANSITION_DIAMETER_FT,)
 
 from app.navproxy.flight_band_resolver import resolve_applicable_flight_band
 
@@ -597,7 +595,7 @@ def build_route_waypoint_coordinates(
 
 def build_route_waypoint_altitudes(
     route_assertions: list[dict[str, Any]],
-    minimum_agl_ft: int | float,
+    assigned_relative_altitude_ft: int | float,
 ) -> list[float]:
     """Build absolute altitude in meters for each Route waypoint."""
 
@@ -620,7 +618,7 @@ def build_route_waypoint_altitudes(
         waypoint_altitudes.append(
             absolute_altitude_meters(
                 first_ground_elevation_ft,
-                minimum_agl_ft + MISSION_ALTITUDE_MARGIN_FT,
+                assigned_relative_altitude_ft,
             )
         )
 
@@ -628,7 +626,7 @@ def build_route_waypoint_altitudes(
             waypoint_altitudes.append(
                 absolute_altitude_meters(
                     attributes["ground_elevation_ft"],
-                    minimum_agl_ft + MISSION_ALTITUDE_MARGIN_FT,
+                    assigned_relative_altitude_ft,
                 )
             )
 
@@ -823,7 +821,7 @@ def build_route_speed_limits(route_assertions: list[dict[str, Any]],
 
 def resolve_mission_altitude_band(
     flight_execution: dict[str, Any],
-) -> tuple[int | float, int | float]:
+) -> tuple[str, int | float, int | float]:
     """
     Resolve the Phase 2 mission altitude band from the single applicable
     Flight Band.
@@ -863,6 +861,7 @@ def resolve_mission_altitude_band(
 
     minimum_agl_ft = applicable_flight_band.get("min_agl_ft")
     maximum_agl_ft = applicable_flight_band.get("max_agl_ft")
+    flight_band_id = applicable_flight_band.get("flight_band_id")
 
     if (
         isinstance(minimum_agl_ft, bool)
@@ -882,7 +881,7 @@ def resolve_mission_altitude_band(
             "Applicable Flight Band is missing a valid max_agl_ft."
         )
 
-    return minimum_agl_ft, maximum_agl_ft
+    return flight_band_id, minimum_agl_ft, maximum_agl_ft
 
 
 def build_mission_items(
@@ -893,6 +892,7 @@ def build_mission_items(
     route_waypoint_ranges: list[dict[str, int]],
     route_speed_limits: list[dict[str, Any]],
     minimum_agl_ft: int | float,
+    assigned_relative_altitude_ft: int | float,
     arrival_assertion: dict[str, Any],
     failsafe_branches: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -938,7 +938,7 @@ def build_mission_items(
 
     takeoff_altitude_meters = absolute_altitude_meters(
         departure_ground_elevation_ft,
-        minimum_agl_ft + MISSION_ALTITUDE_MARGIN_FT,
+        assigned_relative_altitude_ft,
     )
 
     destination_ground_elevation_ft = (
@@ -1145,6 +1145,10 @@ def build_route_conformance_segments(
 
 def interpret_flight_execution(
     document: dict[str, Any],
+    flight_band_id: str,
+    minimum_agl_ft: int | float,
+    maximum_agl_ft: int | float,
+    assigned_relative_altitude_ft: int | float,
 ) -> dict[str, Any]:
     """
     Interpret a Flight Execution Record into an ordered NAVProxy command stream.
@@ -1218,13 +1222,9 @@ def interpret_flight_execution(
         route_assertions
     )
 
-    minimum_agl_ft, maximum_agl_ft = resolve_mission_altitude_band(
-        flight_execution
-    )
-
     waypoint_altitudes = build_route_waypoint_altitudes(
         route_assertions,
-        minimum_agl_ft,
+        assigned_relative_altitude_ft,
     )
 
     route_waypoint_ranges = build_route_waypoint_ranges(
@@ -1269,6 +1269,7 @@ def interpret_flight_execution(
         route_waypoint_ranges=route_waypoint_ranges,
         route_speed_limits=route_speed_limits,
         minimum_agl_ft=minimum_agl_ft,
+        assigned_relative_altitude_ft=assigned_relative_altitude_ft,
         arrival_assertion=arrival_assertion,
         failsafe_branches=failsafe_branches,
     )
@@ -1282,6 +1283,7 @@ def interpret_flight_execution(
 
     return {
         "flight_execution_id": flight_execution_id,
+        "flight_band_id": flight_band_id,
         "assertions": assertions,
         "mission": {
             "minimum_agl_ft": minimum_agl_ft,
@@ -1301,6 +1303,10 @@ def interpret_flight_execution(
 
 def compile_flight_execution(
     flight_execution: dict[str, Any],
+    flight_band_id: str,
+    minimum_agl_ft: int | float,
+    maximum_agl_ft: int | float,
+    assigned_relative_altitude_ft: int | float,
 ) -> dict[str, Any]:
     """Compile an already-loaded FER into the NAVProxy IR."""
 
@@ -1311,23 +1317,11 @@ def compile_flight_execution(
 
     return interpret_flight_execution(
         document={"flight_execution": flight_execution},
+        flight_band_id=flight_band_id,
+        minimum_agl_ft=minimum_agl_ft,
+        maximum_agl_ft=maximum_agl_ft,
+        assigned_relative_altitude_ft=assigned_relative_altitude_ft,
     )
-
-
-def load_and_compile_flight_execution(
-    flight_execution_id: str,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Load one FER from the API and compile it into the NAVProxy IR."""
-
-    flight_execution = load_flight_execution(
-        flight_execution_id=flight_execution_id,
-    )
-
-    compiler_ir = compile_flight_execution(
-        flight_execution=flight_execution,
-    )
-
-    return flight_execution, compiler_ir
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -1736,8 +1730,22 @@ def main() -> int:
                 "Input JSON is missing the flight_execution object."
             )
 
+        flight_band_id, minimum_agl_ft, maximum_agl_ft = (
+            resolve_mission_altitude_band(
+                flight_execution
+            )
+        )
+
+        assigned_relative_altitude_ft = (
+            minimum_agl_ft + VERTICAL_CONFORMANCE_MARGIN_FT
+        )
+
         assertion_stream = compile_flight_execution(
             flight_execution=flight_execution,
+            flight_band_id=flight_band_id,
+            minimum_agl_ft=minimum_agl_ft,
+            maximum_agl_ft=maximum_agl_ft,
+            assigned_relative_altitude_ft=assigned_relative_altitude_ft,
         )
 
         json.dump(assertion_stream, sys.stdout, indent=2)

@@ -47,7 +47,9 @@ from app.navproxy.mavlink_telemetry import (
 )
 from .tooling.fer_compiler import (
     FlightExecutionCompileError,
-    load_and_compile_flight_execution,
+    load_flight_execution,
+    compile_flight_execution,
+    resolve_mission_altitude_band,
     load_flight_bands,
     build_verified_route_mission_ranges,
 )
@@ -85,6 +87,11 @@ from app.models.flight_execution_model import (
 from .flight_band_resolver import resolve_applicable_flight_band
 
 from app.navproxy.telemetry_publisher import TelemetryPublisher
+
+from app.navproxy.rse.route_reservation import (
+    RouteSlotReservationError,
+    reserve_route_slot,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -151,8 +158,56 @@ def run_navproxy_process(
     )
 
     try:
-        flight_execution, compiler_ir = load_and_compile_flight_execution(
+        flight_execution = load_flight_execution(
             flight_execution_id=flight_execution_id,
+        )
+
+        flight_band_id, minimum_agl_ft, maximum_agl_ft = (
+            resolve_mission_altitude_band(
+                flight_execution
+            )
+        )
+    except FlightExecutionCompileError:
+        release_flight_execution(
+            flight_execution_id,
+        )
+
+        LOGGER.exception(
+            "NAVProxy Flight Execution compilation failed: "
+            "execution=%s flight=%s",
+            flight_execution_id,
+            flight_id,
+        )
+
+        return
+
+    try:
+        assigned_relative_altitude_ft = reserve_route_slot(
+            flight_execution_id=flight_execution_id,
+            route_id=flight_execution["route_ids"][0],
+            flight_band_id=flight_band_id,
+        )
+    except RouteSlotReservationError:
+        release_flight_execution(
+            flight_execution_id,
+        )
+
+        LOGGER.exception(
+            "NAVProxy Route slot reservation failed: "
+            "execution=%s flight=%s",
+            flight_execution_id,
+            flight_id,
+        )
+
+        return
+
+    try:
+        compiler_ir = compile_flight_execution(
+            flight_execution=flight_execution,
+            flight_band_id=flight_band_id,
+            minimum_agl_ft=minimum_agl_ft,
+            maximum_agl_ft=maximum_agl_ft,
+            assigned_relative_altitude_ft=assigned_relative_altitude_ft,
         )
     except FlightExecutionCompileError:
         release_flight_execution(
