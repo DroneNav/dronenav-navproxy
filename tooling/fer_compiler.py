@@ -34,6 +34,7 @@ from app.config.constants import (
 
 from app.navproxy.flight_band_resolver import resolve_applicable_flight_band
 
+from app.services.geometry_service import build_offset_polyline
 
 class FlightExecutionCompileError(ValueError):
     """Raised when a Flight Execution Record cannot be interpreted."""
@@ -493,7 +494,8 @@ def build_route_assertions(
             {
                 "assertion_type": "NAV_ASSERT_ROUTE",
                 "parameters": {
-                    "route_id": route_id,  
+                    "route_id": route_id,
+                    "direction": route.get("direction"), 
                     "geometry_type": "linestring",
                     "coordinates": geometry["coordinates"],
                     "segment_attributes": segment_attributes,
@@ -502,6 +504,67 @@ def build_route_assertions(
         )
 
     return assertions
+
+
+def build_operational_route_assertions(
+    route_assertions: list[dict[str, Any]],
+    departure_coordinate: list[float],
+) -> list[dict[str, Any]]:
+    """Orient Route copies in the order this flight traverses them."""
+
+    operational_route_assertions: list[dict[str, Any]] = []
+    previous_coordinate = departure_coordinate
+
+    for route_assertion in route_assertions:
+        parameters = route_assertion["parameters"]
+        coordinates = parameters["coordinates"]
+        segment_attributes = parameters["segment_attributes"]
+
+        start_distance_ft = get_coordinate_distance_ft(
+            previous_coordinate,
+            coordinates[0],
+        )
+
+        end_distance_ft = get_coordinate_distance_ft(
+            previous_coordinate,
+            coordinates[-1],
+        )
+
+        if start_distance_ft <= end_distance_ft:
+            operational_coordinates = [
+                list(coordinate)
+                for coordinate in coordinates
+            ]
+            operational_segment_attributes = [
+                dict(attributes)
+                for attributes in segment_attributes
+            ]
+        else:
+            operational_coordinates = [
+                list(coordinate)
+                for coordinate in reversed(coordinates)
+            ]
+            operational_segment_attributes = [
+                dict(attributes)
+                for attributes in reversed(segment_attributes)
+            ]
+
+        operational_route_assertion = {
+            **route_assertion,
+            "parameters": {
+                **parameters,
+                "coordinates": operational_coordinates,
+                "segment_attributes": operational_segment_attributes,
+            },
+        }
+
+        operational_route_assertions.append(
+            operational_route_assertion
+        )
+
+        previous_coordinate = operational_coordinates[-1]
+
+    return operational_route_assertions
 
 
 def build_route_waypoint_coordinates(
@@ -589,6 +652,66 @@ def build_route_waypoint_coordinates(
             waypoint_coordinates.extend(route_coordinates)
 
         previous_route_endpoint = route_coordinates[-1]
+
+    return waypoint_coordinates
+
+
+def build_route_lane_coordinates(
+    route_assertion: dict[str, Any],
+    side: str,
+) -> list[list[float]]:
+    """Build operational lane coordinates for one Route."""
+
+    parameters = route_assertion.get("parameters")
+
+    if not isinstance(parameters, dict):
+        raise FlightExecutionCompileError(
+            "Route assertion is missing its parameters object."
+        )
+
+    coordinates = parameters.get("coordinates")
+    segment_attributes = parameters.get("segment_attributes")
+
+    if not isinstance(coordinates, list) or len(coordinates) < 2:
+        raise FlightExecutionCompileError(
+            "Each Route must contain at least two coordinates."
+        )
+
+    if (
+        not isinstance(segment_attributes, list)
+        or len(segment_attributes) != len(coordinates) - 1
+    ):
+        raise FlightExecutionCompileError(
+            "Route segment attributes do not match Route geometry."
+        )
+
+    segment_widths_ft = [
+        attributes["route_width_ft"]
+        for attributes in segment_attributes
+    ]
+
+    return build_offset_polyline(
+        coordinates=coordinates,
+        segment_widths_ft=segment_widths_ft,
+        side=side,
+    )
+
+
+def build_route_lane_waypoint_coordinates(
+    route_assertions: list[dict[str, Any]],
+    side: str,
+) -> list[list[float]]:
+    """Build operational lane waypoint coordinates for ordered Routes."""
+
+    waypoint_coordinates: list[list[float]] = []
+
+    for route_assertion in route_assertions:
+        route_coordinates = build_route_lane_coordinates(
+            route_assertion,
+            side=side,
+        )
+
+        waypoint_coordinates.extend(route_coordinates)
 
     return waypoint_coordinates
 
@@ -1112,6 +1235,7 @@ def build_route_transitions(
 
 def build_route_conformance_segments(
     route_assertions: list[dict[str, Any]],
+    side: str,
 ) -> list[dict[str, Any]]:
     """Build ordered Route segments for in-flight conformance evaluation."""
 
@@ -1122,6 +1246,10 @@ def build_route_conformance_segments(
         route_id = parameters["route_id"]
         coordinates = parameters["coordinates"]
         segment_attributes = parameters["segment_attributes"]
+        lane_coordinates = build_route_lane_coordinates(
+            route_assertion,
+            side=side,
+        )
 
         for segment_index in range(len(coordinates) - 1):
             start_coordinate = coordinates[segment_index]
@@ -1134,6 +1262,8 @@ def build_route_conformance_segments(
                 "route_segment_index": segment_index,
                 "start_coordinate": start_coordinate,
                 "end_coordinate": end_coordinate,
+                "operational_start_coordinate": lane_coordinates[segment_index],
+                "operational_end_coordinate": lane_coordinates[segment_index + 1],
                 "route_width_ft": attributes["route_width_ft"],
                 "speed_limit_mph": attributes["speed_limit_mph"],
                 "ground_elevation_ft": attributes["ground_elevation_ft"],
@@ -1218,8 +1348,9 @@ def interpret_flight_execution(
                 **route_assertion,
         })
 
-    waypoint_coordinates = build_route_waypoint_coordinates(
-        route_assertions
+    waypoint_coordinates = build_route_lane_waypoint_coordinates(
+        route_assertions,
+        side="right",
     )
 
     waypoint_altitudes = build_route_waypoint_altitudes(
@@ -1236,7 +1367,8 @@ def interpret_flight_execution(
     )
 
     route_conformance_segments = build_route_conformance_segments(
-        route_assertions
+        route_assertions,
+        side="right",
     )
 
     launch_parameters = launch_assertion["parameters"]

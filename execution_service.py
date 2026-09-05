@@ -24,6 +24,7 @@ from app.config.constants import (
     DEFAULT_API_TIMEOUT_SECONDS,
     LAUNCH_WINDOW_EXPIRES_MINUTES,
     LAUNCH_WINDOW_PREFLIGHT_MINUTES,
+    MIN_OPPOSING_LANE_CLEARANCE_FT,
 )
 
 from . import constants
@@ -734,6 +735,51 @@ def run_navproxy_process(
                         },
                     )
 
+                lane_conformance = evaluate_lane_conformance(
+                    telemetry,
+                    segment,
+                )
+
+                next_segment = get_route_conformance_segment(
+                    context.compiler_ir,
+                    context.active_route_segment_index + 1,
+                )
+
+                if (
+                    not lane_conformance["inside"]
+                    and next_segment is not None
+                    and next_segment["route_index"] == segment["route_index"]
+                ):
+                    next_lane_conformance = evaluate_lane_conformance(
+                        telemetry,
+                        next_segment,
+                    )
+
+                    if next_lane_conformance["inside"]:
+                        lane_conformance = next_lane_conformance
+
+                if not lane_conformance["inside"]:
+                    LOGGER.warning(
+                        "Route lane conformance violation: "
+                        "lane_offset_ft=%s allowed_offset_ft=%s sequence=%s",
+                        lane_conformance["distance_ft"],
+                        lane_conformance["half_width_ft"],
+                        telemetry.mission_sequence,
+                    )
+                    append_flight_log(
+                        context=context,
+                        lifecycle_phase="in_flight",
+                        event_type="Route Lane Deviation",
+                        event_status="Violation",
+                        message="Aircraft moved outside the assigned Route lane.",
+                        details={
+                            "lane_offset_ft": lane_conformance["distance_ft"],
+                            "allowed_offset_ft": lane_conformance["half_width_ft"],
+                            "latitude": telemetry.latitude,
+                            "longitude": telemetry.longitude,
+                        },
+                    )
+
             if (
                 context.active_operational_element == "route"
                 and segment is not None
@@ -1119,8 +1165,8 @@ def evaluate_route_segment_boundary_crossing(
 ) -> bool:
     """Return whether telemetry crossed the segment's forward boundary."""
 
-    start_coordinate = segment["start_coordinate"]
-    end_coordinate = segment["end_coordinate"]
+    start_coordinate = segment["operational_start_coordinate"]
+    end_coordinate = segment["operational_end_coordinate"]
 
     endpoint = (
         f"{DEFAULT_API_BASE_URL.rstrip('/')}"
@@ -1262,6 +1308,62 @@ def evaluate_route_conformance(
         ) from exc
 
     return result
+
+
+def evaluate_lane_conformance(
+    telemetry: TelemetryReading,
+    segment: dict[str, Any],
+) -> dict[str, Any]:
+    """Evaluate one telemetry position against its operational Route lane."""
+
+    start_coordinate = segment["operational_start_coordinate"]
+    end_coordinate = segment["operational_end_coordinate"]
+    route_width_ft = segment["route_width_ft"]
+
+    lane_conformance_width_ft = (
+        (route_width_ft / 2.0)
+        - MIN_OPPOSING_LANE_CLEARANCE_FT
+    )
+
+    endpoint = (
+        f"{DEFAULT_API_BASE_URL.rstrip('/')}"
+        f"/api/routes/segment-conformance"
+    )
+
+    try:
+        response = requests.post(
+            endpoint,
+            json={
+                "latitude": telemetry.latitude,
+                "longitude": telemetry.longitude,
+                "start_latitude": start_coordinate[1],
+                "start_longitude": start_coordinate[0],
+                "end_latitude": end_coordinate[1],
+                "end_longitude": end_coordinate[0],
+                "route_width_ft": lane_conformance_width_ft,
+            },
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            timeout=DEFAULT_API_TIMEOUT_SECONDS,
+        )
+
+        response.raise_for_status()
+        result = response.json()
+
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Could not evaluate Route lane conformance: {exc}"
+        ) from exc
+
+    except requests.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Route lane conformance API returned invalid JSON."
+        ) from exc
+
+    return result
+
 
 def evaluate_vertical_conformance(
     compiler_ir: dict[str, Any],

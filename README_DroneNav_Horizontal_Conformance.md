@@ -19,7 +19,7 @@ This document defines the current rules for:
 -   construction of operational lane geometry;
 -   Route-segment tracking;
 -   governed Route conformance;
--   the planned lane-specific conformance requirement; and
+-   lane-specific runtime conformance; and
 -   the separate aircraft lateral-clearance requirement.
 
 The rules distinguish **governed Route geometry** from **derived
@@ -308,7 +308,7 @@ It must **not** be changed to use the operational lane centerline,
 because doing so would change the meaning of the existing governed Route
 conformance assertion.
 
-## 10. Lane-Specific Conformance --- Required Follow-on
+## 10. Lane-Specific Runtime Conformance
 
 Governed Route conformance and lane conformance answer different
 questions.
@@ -328,10 +328,89 @@ enough from its assigned lane to interfere with opposing traffic.
 Therefore, outer Route conformance alone is not sufficient for
 bidirectional traffic management.
 
-Lane-specific conformance remains a follow-on requirement.
+### 10.1 Lane conformance envelope
 
-No arbitrary fixed lane-conformance tolerance should be introduced until
-the aircraft lateral-clearance model is defined.
+DroneNav defines a minimum protected clearance between the two opposing
+lane-conformance envelopes:
+
+``` text
+MIN_OPPOSING_LANE_CLEARANCE_FT = 5.0
+```
+
+For a Route segment, the full lane-conformance width is derived from the
+governed Route width:
+
+``` text
+lane_conformance_width_ft =
+    (route_width_ft / 2)
+    - MIN_OPPOSING_LANE_CLEARANCE_FT
+
+lane_conformance_half_width_ft =
+    lane_conformance_width_ft / 2
+```
+
+For a 30-ft Route:
+
+``` text
+route_width_ft                         = 30 ft
+lane_center_separation                 = 15 ft
+minimum opposing lane clearance        = 5 ft
+lane_conformance_width_ft              = 10 ft
+lane_conformance_half_width_ft         = 5 ft
+```
+
+The aircraft reference position must therefore remain within 5 ft of its
+assigned operational lane centerline on a 30-ft Route segment.
+
+This runtime envelope is a traffic-lane conformance rule. It does not
+replace the separate aircraft lateral-clearance assertion described
+below, which must account for aircraft physical dimensions,
+navigation/control uncertainty, and required safety clearance.
+
+### 10.2 Bounded operational segment evaluation
+
+Lane conformance is evaluated against the derived operational lane
+segment, not the canonical Route centerline.
+
+The existing Route segment-conformance geometry calculation is reused
+with:
+
+``` text
+operational_start_coordinate
+operational_end_coordinate
+lane_conformance_width_ft
+```
+
+The geometry is a bounded line segment. Conformance therefore measures
+distance to the actual operational segment rather than to an infinite
+extension of its centerline.
+
+### 10.3 Interior-bend flight-controller blending
+
+A flight controller may begin blending into the next mission segment
+before the aircraft crosses the perpendicular forward boundary used by
+NAVProxy to advance the active Route segment.
+
+At an interior bend, lane conformance is therefore satisfied when the
+aircraft reference position is inside either:
+
+1.  the current operational lane segment envelope; or
+2.  the immediately following operational lane segment envelope, provided
+    that the following segment belongs to the same governed Route.
+
+This rule permits normal flight-controller path blending through gradual
+Route bends without widening the lane-conformance envelope.
+
+The next-segment allowance must not cross a Route boundary. Route-to-Route
+transitions remain governed by the separate transition logic described in
+Section 7.
+
+This behavior was SITL-validated on September 5, 2026. Initial runtime
+testing identified three apparent lane deviations of 5.131 ft, 6.749 ft,
+and 5.491 ft from the then-active segment. In each case the aircraft was
+already inside the immediately following operational lane segment
+envelope. After the current-or-next same-Route rule was implemented, the
+same flight completed cleanly with no lane-conformance violations.
 
 ## 11. Aircraft Lateral-Clearance Assertion --- Separate Requirement
 
@@ -443,14 +522,17 @@ Governed Route
 The right-hand operational lane has been validated through the full
 NAVProxy/SITL execution path.
 
+Lane-specific runtime conformance has also been implemented and
+SITL-validated using the derived lane envelope and the current-or-next
+same-Route bend rule.
+
 The remaining horizontal-conformance work is intentionally separated
 into:
 
-1.  **Lane-specific runtime conformance**
-2.  **Aircraft lateral-clearance preflight assertion**
-3.  **Aircraft Profile design and API representation**
-4.  **Formal Route geometry/survey constraints**
-5.  **Route junction, merge, split, and crossing traffic rules**
+1.  **Aircraft lateral-clearance preflight assertion**
+2.  **Aircraft Profile design and API representation**
+3.  **Formal Route geometry/survey constraints**
+4.  **Route junction, merge, split, and crossing traffic rules**
 
 ## 14. Governing Principles
 
@@ -465,6 +547,11 @@ principles:
 -   Use operational geometry for operational segment progression.
 -   Use canonical geometry for governed Route conformance.
 -   Treat lane conformance as distinct from outer Route conformance.
+-   Preserve the derived lane-conformance envelope through bends by
+    accepting the current or immediately following bounded operational
+    segment on the same Route.
+-   Keep Route-to-Route transition handling separate from within-Route
+    bend blending.
 -   Derive aircraft-specific clearance from explicit aircraft and safety
     characteristics rather than arbitrary fixed tolerances.
 -   Reject unsafe aircraft/Route combinations during preflight rather
