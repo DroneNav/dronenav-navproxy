@@ -332,6 +332,11 @@ def run_navproxy_process(
 
     last_telemetry: TelemetryReading | None = None
 
+    max_lane_offset_ft: float | None = None
+    max_lane_offset_sequence: int | None = None
+    max_lane_offset_route_id: str | None = None
+    max_lane_offset_route_segment_index: int | None = None
+
     try:
         if NAVPROXY_FC_MODE == "mavlink":
             telemetry_iterable = mavlink_telemetry_source.iter_telemetry()
@@ -745,6 +750,8 @@ def run_navproxy_process(
                     context.active_route_segment_index + 1,
                 )
 
+                next_lane_conformance = None
+
                 if (
                     not lane_conformance["inside"]
                     and next_segment is not None
@@ -758,14 +765,54 @@ def run_navproxy_process(
                     if next_lane_conformance["inside"]:
                         lane_conformance = next_lane_conformance
 
+
+                diagnostic_lane_conformance = lane_conformance
+                diagnostic_segment = segment
+
+                if (
+                    next_lane_conformance is not None
+                    and next_lane_conformance["distance_ft"]
+                    < diagnostic_lane_conformance["distance_ft"]
+                ):
+                    diagnostic_lane_conformance = next_lane_conformance
+                    diagnostic_segment = next_segment
+
+                if (
+                    max_lane_offset_ft is None
+                    or diagnostic_lane_conformance["distance_ft"]
+                    > max_lane_offset_ft
+                ):
+                    max_lane_offset_ft = (
+                        diagnostic_lane_conformance["distance_ft"]
+                    )
+                    max_lane_offset_sequence = telemetry.mission_sequence
+                    max_lane_offset_route_id = diagnostic_segment["route_id"]
+                    max_lane_offset_route_segment_index = (
+                        diagnostic_segment["route_segment_index"]
+                    )
+
                 if not lane_conformance["inside"]:
                     LOGGER.warning(
                         "Route lane conformance violation: "
-                        "lane_offset_ft=%s allowed_offset_ft=%s sequence=%s",
+                        "lane_offset_ft=%s allowed_offset_ft=%s "
+                        "segment_index=%s next_lane_offset_ft=%s "
+                        "next_segment_index=%s sequence=%s",
                         lane_conformance["distance_ft"],
                         lane_conformance["half_width_ft"],
+                        segment["route_segment_index"],
+                        (
+                            next_lane_conformance["distance_ft"]
+                            if next_lane_conformance is not None
+                            else None
+                        ),
+                        (
+                            next_segment["route_segment_index"]
+                            if next_lane_conformance is not None
+                            else None
+                        ),
                         telemetry.mission_sequence,
                     )
+
                     append_flight_log(
                         context=context,
                         lifecycle_phase="in_flight",
@@ -831,6 +878,18 @@ def run_navproxy_process(
                             "longitude": telemetry.longitude,
                         },
                     )
+
+        if max_lane_offset_ft is not None:
+            LOGGER.info(
+                "Maximum Route lane offset: "
+                "lane_offset_ft=%.2f "
+                "route_id=%s route_segment_index=%s "
+                "sequence=%s",
+                max_lane_offset_ft,
+                max_lane_offset_route_id,
+                max_lane_offset_route_segment_index,
+                max_lane_offset_sequence,
+            )
 
     except HeartbeatRecoveryExpired:
         details: dict[str, Any] = {}

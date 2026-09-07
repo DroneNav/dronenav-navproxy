@@ -195,6 +195,18 @@ survey/governance tooling.
 Aircraft-specific turn-radius validation is a separate future
 requirement associated with the Aircraft Profile.
 
+Route lane conformance at bends: NAVProxy evaluates aircraft position
+against the active operational lane segment and, when applicable, the
+immediately following segment on the same Route. Flight controllers
+operating in autonomous mission modes may smooth or round waypoint
+turns rather than pass exactly through the piecewise-linear lane vertex.
+Consequently, a momentary lane-conformance violation may occur at a
+route bend when the resulting trajectory exceeds the configured
+lane-conformance envelope. Such a violation represents enforcement
+of the configured traffic rule; it does not necessarily indicate loss
+of navigation or route conformance.
+
+
 ## 7. Route-to-Route Transitions
 
 Route junctions, merges, splits, and crossings are distinct from lane
