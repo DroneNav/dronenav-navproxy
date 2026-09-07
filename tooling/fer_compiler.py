@@ -243,6 +243,9 @@ def build_launch_position_assertion(
                 "geometry_type": "circle",
                 "coordinate": geometry["coordinates"],
                 "diameter_ft": diameter_ft,
+                "route_node_id": departure_droneport.get(
+                    "route_node_id"
+                ),
             },
         }
 
@@ -495,7 +498,13 @@ def build_route_assertions(
                 "assertion_type": "NAV_ASSERT_ROUTE",
                 "parameters": {
                     "route_id": route_id,
-                    "direction": route.get("direction"), 
+                    "direction": route.get("direction"),
+                    "origin_route_node_id": route.get(
+                        "origin_route_node_id"
+                    ),
+                    "destination_route_node_id": route.get(
+                        "destination_route_node_id"
+                    ),
                     "geometry_type": "linestring",
                     "coordinates": geometry["coordinates"],
                     "segment_attributes": segment_attributes,
@@ -508,38 +517,67 @@ def build_route_assertions(
 
 def build_operational_route_assertions(
     route_assertions: list[dict[str, Any]],
-    departure_coordinate: list[float],
+    departure_route_node_id: str,
 ) -> list[dict[str, Any]]:
-    """Orient Route copies in the order this flight traverses them."""
+    """Orient ordered Routes according to topology and Route direction."""
 
     operational_route_assertions: list[dict[str, Any]] = []
-    previous_coordinate = departure_coordinate
+    current_route_node_id = str(departure_route_node_id)
 
-    for route_assertion in route_assertions:
+    for route_index, route_assertion in enumerate(route_assertions):
         parameters = route_assertion["parameters"]
+
+        origin_route_node_id = str(
+            parameters["origin_route_node_id"]
+        )
+        destination_route_node_id = str(
+            parameters["destination_route_node_id"]
+        )
+        direction = parameters["direction"]
+
         coordinates = parameters["coordinates"]
         segment_attributes = parameters["segment_attributes"]
 
-        start_distance_ft = get_coordinate_distance_ft(
-            previous_coordinate,
-            coordinates[0],
-        )
+        reversed_route = False
 
-        end_distance_ft = get_coordinate_distance_ft(
-            previous_coordinate,
-            coordinates[-1],
-        )
+        if direction == 0:
+            if current_route_node_id != origin_route_node_id:
+                raise FlightExecutionCompileError(
+                    f"Route at position {route_index + 1} does not connect "
+                    "in its permitted direction."
+                )
 
-        if start_distance_ft <= end_distance_ft:
-            operational_coordinates = [
-                list(coordinate)
-                for coordinate in coordinates
-            ]
-            operational_segment_attributes = [
-                dict(attributes)
-                for attributes in segment_attributes
-            ]
+            next_route_node_id = destination_route_node_id
+
+        elif direction == 1:
+            if current_route_node_id != destination_route_node_id:
+                raise FlightExecutionCompileError(
+                    f"Route at position {route_index + 1} does not connect "
+                    "in its permitted direction."
+                )
+
+            reversed_route = True
+            next_route_node_id = origin_route_node_id
+
+        elif direction == 2:
+            if current_route_node_id == origin_route_node_id:
+                next_route_node_id = destination_route_node_id
+            elif current_route_node_id == destination_route_node_id:
+                reversed_route = True
+                next_route_node_id = origin_route_node_id
+            else:
+                raise FlightExecutionCompileError(
+                    f"Route at position {route_index + 1} does not connect "
+                    "to the preceding Route."
+                )
+
         else:
+            raise FlightExecutionCompileError(
+                f"Route at position {route_index + 1} has an invalid "
+                "direction value."
+            )
+
+        if reversed_route:
             operational_coordinates = [
                 list(coordinate)
                 for coordinate in reversed(coordinates)
@@ -548,112 +586,31 @@ def build_operational_route_assertions(
                 dict(attributes)
                 for attributes in reversed(segment_attributes)
             ]
+        else:
+            operational_coordinates = [
+                list(coordinate)
+                for coordinate in coordinates
+            ]
+            operational_segment_attributes = [
+                dict(attributes)
+                for attributes in segment_attributes
+            ]
 
-        operational_route_assertion = {
+        operational_route_assertions.append({
             **route_assertion,
             "parameters": {
                 **parameters,
                 "coordinates": operational_coordinates,
                 "segment_attributes": operational_segment_attributes,
+                "operational_origin_route_node_id": current_route_node_id,
+                "operational_destination_route_node_id": next_route_node_id,
+                "operational_reversed": reversed_route,
             },
-        }
+        })
 
-        operational_route_assertions.append(
-            operational_route_assertion
-        )
-
-        previous_coordinate = operational_coordinates[-1]
+        current_route_node_id = next_route_node_id
 
     return operational_route_assertions
-
-
-def build_route_waypoint_coordinates(
-    route_assertions: list[dict[str, Any]],
-) -> list[list[float]]:
-    """
-    Expand ordered Route assertions into one continuous waypoint path.
-
-    The first Route contributes every coordinate. Each subsequent Route
-    must begin at the preceding Route's final coordinate; that duplicated
-    boundary coordinate is emitted only once.
-    """
-
-    waypoint_coordinates: list[list[float]] = []
-    previous_route_endpoint: list[float] | None = None
-
-    for route_index, route_assertion in enumerate(route_assertions):
-        if not isinstance(route_assertion, dict):
-            raise FlightExecutionCompileError(
-                "Each Route assertion must be a JSON object."
-            )
-
-        if (
-            route_assertion.get("assertion_type")
-            != "NAV_ASSERT_ROUTE"
-        ):
-            raise FlightExecutionCompileError(
-                "Route waypoint compilation received a non-Route assertion."
-            )
-
-        parameters = route_assertion.get("parameters")
-
-        if not isinstance(parameters, dict):
-            raise FlightExecutionCompileError(
-                "Route assertion is missing its parameters object."
-            )
-
-        coordinates = parameters.get("coordinates")
-
-        if not isinstance(coordinates, list) or len(coordinates) < 2:
-            raise FlightExecutionCompileError(
-                "Each Route must contain at least two coordinates."
-            )
-
-        route_coordinates: list[list[float]] = []
-
-        for coordinate in coordinates:
-            if (
-                not isinstance(coordinate, list)
-                or len(coordinate) < 2
-                or isinstance(coordinate[0], bool)
-                or not isinstance(coordinate[0], (int, float))
-                or isinstance(coordinate[1], bool)
-                or not isinstance(coordinate[1], (int, float))
-            ):
-                raise FlightExecutionCompileError(
-                    "Each Route coordinate must contain numeric "
-                    "longitude and latitude values."
-                )
-
-            route_coordinates.append([
-                coordinate[0],
-                coordinate[1],
-            ])
-
-        if route_index == 0:
-            waypoint_coordinates.extend(route_coordinates)
-        else:
-            if previous_route_endpoint is None:
-                raise FlightExecutionCompileError(
-                    "Previous Route endpoint is unavailable."
-                )
-
-            transition_distance_ft = get_coordinate_distance_ft(
-                previous_route_endpoint,
-                route_coordinates[0],
-            )
-
-            if transition_distance_ft > TRANSITION_DIAMETER_FT:
-                raise FlightExecutionCompileError(
-                    "Ordered Routes are too far apart for a valid "
-                    "Route transition."
-                )
-
-            waypoint_coordinates.extend(route_coordinates)
-
-        previous_route_endpoint = route_coordinates[-1]
-
-    return waypoint_coordinates
 
 
 def build_route_lane_coordinates(
@@ -1340,6 +1297,20 @@ def interpret_flight_execution(
 
     route_assertions = build_route_assertions(
         flight_execution=flight_execution,
+    )
+
+    departure_route_node_id = launch_assertion["parameters"].get(
+        "route_node_id"
+    )
+
+    if route_assertions and not departure_route_node_id:
+        raise FlightExecutionCompileError(
+            "A Route Flight Execution requires a departure Route Node."
+        )
+
+    route_assertions = build_operational_route_assertions(
+        route_assertions=route_assertions,
+        departure_route_node_id=departure_route_node_id,
     )
 
     for route_assertion in route_assertions:
