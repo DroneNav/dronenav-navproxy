@@ -32,6 +32,10 @@ from app.config.constants import (
     DEFAULT_API_TIMEOUT_SECONDS,
     TRANSITION_DIAMETER_FT,)
 
+from app.services.elevation_service import (
+    resolve_coordinate_elevation,
+)
+
 from app.navproxy.flight_band_resolver import resolve_applicable_flight_band
 
 from app.services.geometry_service import build_offset_polyline
@@ -98,6 +102,127 @@ def load_flight_execution(
         )
 
     return flight_execution
+
+
+def resolve_required_route_elevations(
+    flight_execution: dict[str, Any],
+) -> tuple[bool, str]:
+    """
+    Ensure every Route segment required by the flight has ground elevation.
+
+    Existing elevation values are preserved. Missing values are resolved
+    through EPQS and persisted back to the Route before compilation.
+    """
+
+    route_ids = flight_execution.get("route_ids") or []
+
+    if not route_ids:
+        return (
+            True,
+            "The flight does not require Route elevation data.",
+        )
+
+    for route_id in route_ids:
+        route = load_api_object(
+            endpoint=f"/api/routes/{route_id}",
+            object_name="Route",
+        )
+
+        geometry = extract_geometry(
+            route,
+            "Route",
+        )
+
+        coordinates = geometry["coordinates"]
+        segment_attributes = route.get("segment_attributes")
+
+        if not isinstance(segment_attributes, list):
+            return (
+                False,
+                f"Route {route_id} does not contain segment attributes.",
+            )
+
+        if len(segment_attributes) != len(coordinates) - 1:
+            return (
+                False,
+                (
+                    f"Route {route_id} segment attribute count does not "
+                    "match its geometry."
+                ),
+            )
+
+        updated = False
+        unresolved_segment_indexes = []
+
+        for segment_index, attributes in enumerate(
+            segment_attributes
+        ):
+            if attributes.get("ground_elevation_ft") is not None:
+                continue
+
+            coordinate = coordinates[segment_index + 1]
+
+            elevation = resolve_coordinate_elevation(
+                longitude=coordinate[0],
+                latitude=coordinate[1],
+            )
+
+            if elevation is None:
+                unresolved_segment_indexes.append(
+                    segment_index
+                )
+                continue
+
+            attributes["ground_elevation_ft"] = (
+                elevation["ground_elevation_ft"]
+            )
+
+            updated = True
+
+        if updated:
+            url = (
+                f"{DEFAULT_API_BASE_URL.rstrip('/')}"
+                f"/api/routes/{route_id}"
+            )
+
+            try:
+                response = requests.patch(
+                    url,
+                    json={
+                        "segment_attributes": segment_attributes,
+                    },
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=DEFAULT_API_TIMEOUT_SECONDS,
+                )
+
+                response.raise_for_status()
+
+            except requests.RequestException as exc:
+                return (
+                    False,
+                    (
+                        f"Could not persist elevation backfill for "
+                        f"Route {route_id}: {exc}"
+                    ),
+                )
+
+        if unresolved_segment_indexes:
+            return (
+                False,
+                (
+                    f"Route {route_id} has unresolved ground elevation "
+                    f"for segment indexes "
+                    f"{unresolved_segment_indexes}."
+                ),
+            )
+
+    return (
+        True,
+        "All required Route segment elevations are resolved.",
+    )
 
 
 def load_departure_droneport(
@@ -1151,6 +1276,57 @@ def build_arrival_transition(
     }
 
 
+def build_managed_intersections(
+    route_assertions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build managed intersections along the ordered Route path."""
+
+    managed_intersections: list[dict[str, Any]] = []
+
+    for route_index in range(len(route_assertions) - 1):
+        current_parameters = route_assertions[
+            route_index
+        ]["parameters"]
+        next_parameters = route_assertions[
+            route_index + 1
+        ]["parameters"]
+
+        route_node_id = current_parameters[
+            "operational_destination_route_node_id"
+        ]
+
+        next_route_node_id = next_parameters[
+            "operational_origin_route_node_id"
+        ]
+
+        if str(route_node_id) != str(next_route_node_id):
+            raise FlightExecutionCompileError(
+                "Adjacent operational Routes do not share "
+                "the same Route Node."
+            )
+
+        topology = load_api_object(
+            endpoint=(
+                "/api/routes/managed-intersection/"
+                f"{route_node_id}"
+            ),
+            object_name="managed intersection topology",
+        )
+
+        if topology.get("managed") is not True:
+            continue
+
+        managed_intersections.append({
+            "route_node_id": str(route_node_id),
+            "from_route_id": current_parameters["route_id"],
+            "to_route_id": next_parameters["route_id"],
+            "from_route_index": route_index,
+            "to_route_index": route_index + 1,
+        })
+
+    return managed_intersections
+
+
 def build_route_transitions(
     route_assertions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1350,6 +1526,10 @@ def interpret_flight_execution(
         departure_coordinate,
     )
 
+    managed_intersections = build_managed_intersections(
+        route_assertions
+    )
+
     route_transitions = build_route_transitions(
         route_assertions
     )
@@ -1395,6 +1575,7 @@ def interpret_flight_execution(
             "route_conformance_segments": route_conformance_segments,
             "departure_transition": departure_transition,
             "route_transitions": route_transitions,
+            "managed_intersections": managed_intersections,
             "route_speed_limits": route_speed_limits,
             "failsafe_branches": failsafe_branches,
             "failsafe_jump_map": failsafe_jump_map,

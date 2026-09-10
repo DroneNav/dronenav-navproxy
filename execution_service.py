@@ -53,6 +53,7 @@ from .tooling.fer_compiler import (
     resolve_mission_altitude_band,
     load_flight_bands,
     build_verified_route_mission_ranges,
+    resolve_required_route_elevations,
 )
 from app.navproxy.route_timing_model import (
     RouteTimingModel,
@@ -182,6 +183,51 @@ def run_navproxy_process(
 
         return
 
+
+    elevation_assertion_result = (
+        assert_route_elevations_resolved(
+            flight_execution
+        )
+    )
+
+    if not elevation_assertion_result.passed:
+        context = FlightProcessContext(
+            flight_execution_id=flight_execution_id,
+            flight_id=flight_id,
+            lifecycle_phase="pre_flight",
+            flight_execution=flight_execution,
+            compiler_ir={
+                "assertions": [],
+            },
+        )
+
+        preflight_result = PreflightResult(
+            flight_execution_uuid=flight_execution_id,
+            status=constants.PreflightStatus.FAILED,
+            assertion_results=(
+                elevation_assertion_result,
+            ),
+        )
+
+        record_preflight_result(
+            context,
+            preflight_result,
+        )
+
+        release_flight_execution(
+            flight_execution_id,
+        )
+
+        LOGGER.warning(
+            "NAVProxy execution stopped during elevation preflight: "
+            "execution=%s flight=%s",
+            flight_execution_id,
+            flight_id,
+        )
+
+        return
+
+
     try:
         assigned_relative_altitude_ft = reserve_route_slot(
             flight_execution_id=flight_execution_id,
@@ -244,6 +290,17 @@ def run_navproxy_process(
     )
 
     preflight_result = execute_preflight(context)
+
+    preflight_result = PreflightResult(
+        flight_execution_uuid=(
+            preflight_result.flight_execution_uuid
+        ),
+        status=preflight_result.status,
+        assertion_results=(
+            elevation_assertion_result,
+            *preflight_result.assertion_results,
+        ),
+    )
 
     record_preflight_result(
         context,
@@ -1936,6 +1993,22 @@ def assert_arrival_position_in_geometry(
             if inside
             else "Aircraft landed outside the authorized arrival geometry."
         ),
+    )
+
+
+def assert_route_elevations_resolved(
+    flight_execution: dict[str, Any],
+) -> AssertionResult:
+    """Confirm that all required Route elevations can be resolved."""
+
+    passed, message = resolve_required_route_elevations(
+        flight_execution
+    )
+
+    return AssertionResult(
+        command=constants.NAV_ASSERT_ROUTE_ELEVATIONS_RESOLVED,
+        passed=passed,
+        message=message,
     )
 
 

@@ -14,11 +14,19 @@ from app.navproxy.telemetry_publisher import (
     RABBITMQ_VHOST,
     get_rabbitmq_credentials,
 )
+from app.models.route_model import (
+    count_routes_for_route_node,
+    select_shared_route_node,
+)
 from app.models.flight_execution_model import (
     select_flight_execution_route_ranges,
 )
 from app.models.route_occupancy_state_model import (
+    select_route_occupancy_state,
     update_route_occupancy_state,
+)
+from app.navproxy.rse.intersection_reservation import (
+    reserve_intersection,
 )
 
 
@@ -159,9 +167,38 @@ def get_route_for_mission_sequence(
                 else None
             )
 
-            return route, previous_route
+            next_route = (
+                route_ranges[index + 1]
+                if index + 1 < len(route_ranges)
+                else None
+            )
 
-    return None, None
+            return route, previous_route, next_route
+
+    return None, None, None
+
+
+def get_managed_intersection_route_node(
+    route: dict,
+    next_route: dict | None,
+):
+    """Return the managed shared Route Node, if any."""
+
+    if next_route is None:
+        return None
+
+    route_node_id = select_shared_route_node(
+        route["route_id"],
+        next_route["route_id"],
+    )
+
+    if route_node_id is None:
+        return None
+
+    if count_routes_for_route_node(route_node_id) <= 2:
+        return None
+
+    return route_node_id
 
 
 def process_telemetry(message: dict) -> None:
@@ -189,7 +226,7 @@ def process_telemetry(message: dict) -> None:
     if mission_sequence is None:
         return
 
-    route, previous_route = get_route_for_mission_sequence(
+    route, previous_route, next_route = get_route_for_mission_sequence(
         route_ranges,
         int(mission_sequence),
     )
@@ -229,6 +266,38 @@ def process_telemetry(message: dict) -> None:
         "segment_mission_sequences"
     )
 
+    is_last_route_segment = (
+        isinstance(segment_mission_sequences, list)
+        and bool(segment_mission_sequences)
+        and int(mission_sequence)
+        == segment_mission_sequences[-1]
+    )
+
+    managed_route_node_id = None
+
+    if is_last_route_segment:
+        managed_route_node_id = (
+            get_managed_intersection_route_node(
+                route,
+                next_route,
+            )
+        )
+
+    if managed_route_node_id is not None:
+        LOGGER.info(
+            "Managed intersection approach: "
+            "flight_execution_id=%s "
+            "route_node_id=%s "
+            "from_route_id=%s "
+            "to_route_id=%s "
+            "mission_sequence=%s",
+            flight_execution_id,
+            managed_route_node_id,
+            route["route_id"],
+            next_route["route_id"],
+            mission_sequence,
+        )
+
     if (
         not is_final_route_exit
         and isinstance(segment_mission_sequences, list)
@@ -249,7 +318,19 @@ def process_telemetry(message: dict) -> None:
     ):
         return
 
+    intersection_occupancy = None
+
     with engine.begin() as connection:
+
+        if managed_route_node_id is not None:
+            intersection_occupancy = (
+                select_route_occupancy_state(
+                    connection,
+                    route_id=route_id,
+                    flight_execution_id=flight_execution_id,
+                )
+            )
+
         if previous_route_id is not None:
             update_route_occupancy_state(
                 connection,
@@ -269,6 +350,37 @@ def process_telemetry(message: dict) -> None:
             last_longitude=message["longitude"],
             last_altitude_ft=message["relative_altitude_ft"],
             state=current_route_state,
+        )
+
+    if (
+        managed_route_node_id is not None
+        and intersection_occupancy is not None
+    ):
+        intersection_state_id = reserve_intersection(
+            flight_execution_id=str(flight_execution_id),
+            route_node_id=str(managed_route_node_id),
+            flight_band_id=str(
+                intersection_occupancy["flight_band_id"]
+            ),
+            assigned_relative_altitude_ft=int(
+                intersection_occupancy[
+                    "assigned_relative_altitude_ft"
+                ]
+            ),
+            from_route_id=str(route["route_id"]),
+            to_route_id=str(next_route["route_id"]),
+        )
+
+        LOGGER.info(
+            "Intersection reservation result: "
+            "flight_execution_id=%s "
+            "route_node_id=%s "
+            "reserved=%s "
+            "intersection_state_id=%s",
+            flight_execution_id,
+            managed_route_node_id,
+            intersection_state_id is not None,
+            intersection_state_id,
         )
 
     route["_last_processed_segment_sequence"] = int(
