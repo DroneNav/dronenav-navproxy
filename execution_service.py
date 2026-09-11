@@ -95,6 +95,11 @@ from app.navproxy.rse.route_reservation import (
     reserve_route_slot,
 )
 
+from app.navproxy.altitude import (
+    interpolate_ground_elevation_ft,
+    segment_progress,
+)
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -893,12 +898,32 @@ def run_navproxy_process(
                     context.compiler_ir["mission"]["route_conformance_segments"]
                 ) - 1
             ):
-                actual_agl_ft = (
-                    telemetry.absolute_altitude_ft
-                    - segment["ground_elevation_ft"]
-                    if telemetry.absolute_altitude_ft is not None
-                    else telemetry.relative_altitude_ft
+                previous_segment = (
+                    context.compiler_ir["mission"]["route_conformance_segments"][
+                        segment["flat_segment_index"] - 1
+                    ]
                 )
+
+                if telemetry.absolute_altitude_ft is not None:
+                    progress = segment_progress(
+                        telemetry.latitude,
+                        telemetry.longitude,
+                        segment["start_coordinate"],
+                        segment["end_coordinate"],
+                    )
+
+                    ground_elevation_ft = interpolate_ground_elevation_ft(
+                        progress,
+                        previous_segment["ground_elevation_ft"],
+                        segment["ground_elevation_ft"],
+                    )
+
+                    actual_agl_ft = (
+                        telemetry.absolute_altitude_ft
+                        - ground_elevation_ft
+                    )
+                else:
+                    actual_agl_ft = telemetry.relative_altitude_ft
 
                 vertical_conformance = evaluate_vertical_conformance(
                     context.compiler_ir,
