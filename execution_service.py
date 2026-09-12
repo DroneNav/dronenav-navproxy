@@ -100,6 +100,10 @@ from app.navproxy.altitude import (
     segment_progress,
 )
 
+from app.navproxy.rse.droneport_launch_reservation import (
+    wait_for_droneport_launch_authorization,
+)
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -362,6 +366,10 @@ def run_navproxy_process(
         program_failsafe_recovery_map(
             connection=connection,
             compiler_ir=context.compiler_ir,
+        )
+
+        wait_for_droneport_launch_authorization(
+            flight_execution_id=context.flight_execution_id,
         )
 
         start_scheduled_flight(
