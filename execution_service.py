@@ -104,6 +104,11 @@ from app.navproxy.rse.droneport_launch_reservation import (
     wait_for_droneport_launch_authorization,
 )
 
+from app.navproxy.rse.droneport_landing_assignment import (
+    DronePortLandingAssignmentError,
+    assign_droneport_landing_space,
+)
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -238,6 +243,25 @@ def run_navproxy_process(
 
 
     try:
+        landing_assignment = assign_droneport_landing_space(
+            flight_execution_id=flight_execution_id,
+        )
+    except DronePortLandingAssignmentError:
+        release_flight_execution(
+            flight_execution_id,
+        )
+
+        LOGGER.exception(
+            "NAVProxy landing-space assignment failed: "
+            "execution=%s flight=%s",
+            flight_execution_id,
+            flight_id,
+        )
+
+        return
+
+
+    try:
         assigned_relative_altitude_ft = reserve_route_slot(
             flight_execution_id=flight_execution_id,
             route_id=flight_execution["route_ids"][0],
@@ -257,6 +281,7 @@ def run_navproxy_process(
 
         return
 
+
     try:
         compiler_ir = compile_flight_execution(
             flight_execution=flight_execution,
@@ -264,6 +289,7 @@ def run_navproxy_process(
             minimum_agl_ft=minimum_agl_ft,
             maximum_agl_ft=maximum_agl_ft,
             assigned_relative_altitude_ft=assigned_relative_altitude_ft,
+            landing_assignment=landing_assignment,
         )
     except FlightExecutionCompileError:
         release_flight_execution(

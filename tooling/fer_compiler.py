@@ -406,6 +406,7 @@ def build_launch_position_assertion(
 
 def build_arrival_position_assertion(
     flight_execution: dict[str, Any],
+    landing_assignment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build exactly one arrival-position assertion.
@@ -437,6 +438,33 @@ def build_arrival_position_assertion(
             raise FlightExecutionCompileError(
                 "Arrival DronePort geometry must be Point."
             )
+
+        arrival_coordinate = geometry["coordinates"]
+
+        if landing_assignment is not None:
+            assigned_droneport_id = landing_assignment.get(
+                "arrival_droneport_id"
+            )
+
+            if assigned_droneport_id != arrival_droneport_id:
+                raise FlightExecutionCompileError(
+                    "Landing-space assignment does not match "
+                    "the Flight Execution arrival DronePort."
+                )
+
+        assigned_coordinate = landing_assignment.get(
+            "coordinate"
+        )
+
+        if (
+            not isinstance(assigned_coordinate, list)
+            or len(assigned_coordinate) < 2
+        ):
+            raise FlightExecutionCompileError(
+                "Landing-space assignment is missing a valid coordinate."
+            )
+
+        arrival_coordinate = assigned_coordinate
 
         diameter_ft = arrival_droneport.get(
             "droneport_diameter_ft"
@@ -1098,7 +1126,7 @@ def build_mission_items(
     route_speed_limits: list[dict[str, Any]],
     minimum_agl_ft: int | float,
     assigned_relative_altitude_ft: int | float,
-    arrival_assertion: dict[str, Any],
+    arrival_coordinate: list[float],
     failsafe_branches: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Build the ordered DroneNav mission stream."""
@@ -1119,15 +1147,6 @@ def build_mission_items(
         raise FlightExecutionCompileError(
             "Mission minimum_agl_ft must be a positive number."
         )
-
-    parameters = arrival_assertion.get("parameters")
-
-    if not isinstance(parameters, dict):
-        raise FlightExecutionCompileError(
-            "Arrival assertion is missing its parameters object."
-        )
-
-    arrival_coordinate = parameters.get("coordinate")
 
     if (
         not isinstance(arrival_coordinate, list)
@@ -1257,12 +1276,11 @@ def build_departure_transition(
 
 
 def build_arrival_transition(
-    arrival_assertion: dict[str, Any],
+    arrival_coordinate: list[float],
     route_conformance_segments: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Build the final Route-to-arrival DronePort transition geometry."""
 
-    arrival_coordinate = arrival_assertion["parameters"]["coordinate"]
     last_route_coordinate = (
         route_conformance_segments[-1]["end_coordinate"]
     )
@@ -1412,6 +1430,7 @@ def interpret_flight_execution(
     minimum_agl_ft: int | float,
     maximum_agl_ft: int | float,
     assigned_relative_altitude_ft: int | float,
+    landing_assignment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Interpret a Flight Execution Record into an ordered NAVProxy command stream.
@@ -1464,12 +1483,18 @@ def interpret_flight_execution(
 
     arrival_assertion = build_arrival_position_assertion(
         flight_execution=flight_execution,
+        landing_assignment=landing_assignment,
     )
 
     assertions.append({
         "sequence": len(assertions),
         **arrival_assertion,
     })
+
+    landing_coordinate = arrival_assertion["parameters"]["coordinate"]
+
+    if landing_assignment is not None:
+        landing_coordinate = landing_assignment["coordinate"]
 
     route_assertions = build_route_assertions(
         flight_execution=flight_execution,
@@ -1540,7 +1565,7 @@ def interpret_flight_execution(
     )
 
     arrival_transition = build_arrival_transition(
-        arrival_assertion,
+        landing_coordinate,
         route_conformance_segments,
     )
 
@@ -1553,7 +1578,7 @@ def interpret_flight_execution(
         route_speed_limits=route_speed_limits,
         minimum_agl_ft=minimum_agl_ft,
         assigned_relative_altitude_ft=assigned_relative_altitude_ft,
-        arrival_assertion=arrival_assertion,
+        arrival_coordinate=landing_coordinate,
         failsafe_branches=failsafe_branches,
     )
 
@@ -1591,6 +1616,7 @@ def compile_flight_execution(
     minimum_agl_ft: int | float,
     maximum_agl_ft: int | float,
     assigned_relative_altitude_ft: int | float,
+    landing_assignment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile an already-loaded FER into the NAVProxy IR."""
 
@@ -1605,6 +1631,7 @@ def compile_flight_execution(
         minimum_agl_ft=minimum_agl_ft,
         maximum_agl_ft=maximum_agl_ft,
         assigned_relative_altitude_ft=assigned_relative_altitude_ft,
+        landing_assignment=landing_assignment,
     )
 
 
