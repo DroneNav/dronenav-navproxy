@@ -104,6 +104,52 @@ def load_flight_execution(
     return flight_execution
 
 
+def load_next_flight_execution(
+    root_flight_execution_id: str,
+    current_flight_execution_id: str,
+) -> dict[str, Any] | None:
+    """Retrieve the next Flight Execution Record in a root FER series."""
+
+    endpoint = (
+        f"/api/flight-executions/{root_flight_execution_id}"
+        f"/next/{current_flight_execution_id}"
+    )
+
+    url = f"{DEFAULT_API_BASE_URL.rstrip('/')}{endpoint}"
+
+    try:
+        response = requests.get(
+            url,
+            headers={"Accept": "application/json"},
+            timeout=DEFAULT_API_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise FlightExecutionCompileError(
+            f"Could not retrieve next Flight Execution Record "
+            f"from {url}: {exc}"
+        ) from exc
+
+    try:
+        value = response.json()
+    except requests.JSONDecodeError as exc:
+        raise FlightExecutionCompileError(
+            "The API returned invalid JSON for "
+            "Next Flight Execution Record."
+        ) from exc
+
+    if value is None:
+        return None
+
+    if not isinstance(value, dict):
+        raise FlightExecutionCompileError(
+            "The next Flight Execution API response "
+            "must be a JSON object or null."
+        )
+
+    return value
+
+
 def resolve_required_route_elevations(
     flight_execution: dict[str, Any],
 ) -> tuple[bool, str]:

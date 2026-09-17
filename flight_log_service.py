@@ -17,6 +17,7 @@ import json
 class FlightProcessContext:
     """Runtime state required during one NAVProxy-controlled flight."""
 
+    root_flight_execution_id: str
     flight_execution_id: str
     flight_id: str
     lifecycle_phase: str

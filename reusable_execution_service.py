@@ -264,6 +264,7 @@ def run_reusable_navproxy_process(
     )
 
     context = FlightProcessContext(
+        root_flight_execution_id=flight_execution_id,
         flight_execution_id=flight_execution_id,
         flight_id=flight_id,
         lifecycle_phase="pre_flight",

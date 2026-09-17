@@ -49,6 +49,7 @@ from app.navproxy.mavlink_telemetry import (
 from .tooling.fer_compiler import (
     FlightExecutionCompileError,
     load_flight_execution,
+    load_next_flight_execution,
     compile_flight_execution,
     resolve_mission_altitude_band,
     load_flight_bands,
@@ -84,7 +85,9 @@ from app.navproxy.tooling.upload_mission import (
 )
 from app.models.flight_execution_model import (
     complete_scheduled_flight_execution,
+    dispatch_child_flight_execution,
     update_flight_execution_route_mission_ranges,
+    update_requested_departure_datetime,
 )
 from .flight_band_resolver import resolve_applicable_flight_band
 
@@ -142,6 +145,12 @@ class PostflightResult:
     status: constants.PostflightStatus
     assertion_results: tuple[AssertionResult, ...]
 
+@dataclass(frozen=True)
+class FlightExecutionResult:
+    """Result of one NAVProxy-controlled Flight Execution."""
+
+    completed: bool
+
 
 def run_navproxy_process(
     flight_execution_id: str,
@@ -149,6 +158,71 @@ def run_navproxy_process(
     preflight_seconds: int = DEFAULT_PREFLIGHT_SECONDS,
     flight_seconds: int = DEFAULT_FLIGHT_SECONDS,
 ) -> None:
+    """Run one NAVProxy-controlled scheduled flight."""
+
+    next_flight_execution = load_next_flight_execution(
+        root_flight_execution_id=flight_execution_id,
+        current_flight_execution_id=flight_execution_id,
+    )
+
+    result = _execute_flight_execution(
+        root_flight_execution_id=flight_execution_id,
+        flight_execution_id=flight_execution_id,
+        flight_id=flight_id,
+        is_final_flight_execution=(
+            next_flight_execution is None
+        ),
+        preflight_seconds=preflight_seconds,
+        flight_seconds=flight_seconds,
+    )
+
+    if not result.completed:
+        return
+
+    if next_flight_execution is None:
+        return
+
+    next_flight = dispatch_child_flight_execution(
+        flight_execution_id=next_flight_execution[
+            "flight_execution_id"
+        ],
+        aviator_id=next_flight_execution["aviator_id"],
+        aircraft_id=next_flight_execution["aircraft_id"],
+    )
+
+    if next_flight is None:
+        LOGGER.error(
+            "Could not dispatch child Flight Execution: "
+            "root=%s current=%s child=%s",
+            flight_execution_id,
+            flight_execution_id,
+            next_flight_execution["flight_execution_id"],
+        )
+        return
+
+    result = _execute_flight_execution(
+        root_flight_execution_id=flight_execution_id,
+        flight_execution_id=next_flight_execution[
+            "flight_execution_id"
+        ],
+        flight_id=str(next_flight["flight_id"]),
+        is_final_flight_execution=True,
+        preflight_seconds=preflight_seconds,
+        flight_seconds=flight_seconds,
+    )
+
+    if not result.completed:
+        return
+
+
+def _execute_flight_execution(
+    root_flight_execution_id: str,
+    flight_execution_id: str,
+    flight_id: str,
+    is_final_flight_execution: bool,
+    preflight_seconds: int = DEFAULT_PREFLIGHT_SECONDS,
+    flight_seconds: int = DEFAULT_FLIGHT_SECONDS,
+) -> FlightExecutionResult:
     """Run one NAVProxy-controlled scheduled flight."""
 
     if NAVPROXY_FC_MODE not in {"simulator", "mavlink"}:
@@ -195,7 +269,9 @@ def run_navproxy_process(
             flight_id,
         )
 
-        return
+        return FlightExecutionResult(
+            completed=False,
+        )
 
 
     elevation_assertion_result = (
@@ -206,6 +282,7 @@ def run_navproxy_process(
 
     if not elevation_assertion_result.passed:
         context = FlightProcessContext(
+            root_flight_execution_id=root_flight_execution_id,
             flight_execution_id=flight_execution_id,
             flight_id=flight_id,
             lifecycle_phase="pre_flight",
@@ -239,7 +316,9 @@ def run_navproxy_process(
             flight_id,
         )
 
-        return
+        return FlightExecutionResult(
+            completed=False,
+        )
 
 
     try:
@@ -258,7 +337,9 @@ def run_navproxy_process(
             flight_id,
         )
 
-        return
+        return FlightExecutionResult(
+            completed=False,
+        )
 
 
     try:
@@ -279,7 +360,9 @@ def run_navproxy_process(
             flight_id,
         )
 
-        return
+        return FlightExecutionResult(
+            completed=False,
+        )
 
 
     try:
@@ -303,9 +386,13 @@ def run_navproxy_process(
             flight_id,
         )
 
-        return
+        return FlightExecutionResult(
+            completed=False,
+        )
+
 
     context = FlightProcessContext(
+        root_flight_execution_id=root_flight_execution_id,
         flight_execution_id=flight_execution_id,
         flight_id=flight_id,
         lifecycle_phase="pre_flight",
@@ -354,7 +441,10 @@ def run_navproxy_process(
             context.flight_execution_id,
             context.flight_id,
         )
-        return
+
+        return FlightExecutionResult(
+            completed=False,
+        )
 
     if NAVPROXY_FC_MODE == "simulator":
         simulator.wait_for_preflight_delay()
@@ -1060,10 +1150,16 @@ def run_navproxy_process(
 
         notify_flight_plan_status(
             flight_execution_id=context.flight_execution_id,
-            status=FLIGHT_PLAN_STATUS_COMPLETED,
+            status=(
+                FLIGHT_PLAN_STATUS_COMPLETED
+                if is_final_flight_execution
+                else FLIGHT_PLAN_STATUS_ACTIVE
+            ),
         )
 
-        return
+        return FlightExecutionResult(
+            completed=False,
+        )
 
     finally:
         telemetry_publisher.close()
@@ -1108,7 +1204,11 @@ def run_navproxy_process(
 
         notify_flight_plan_status(
             flight_execution_id=context.flight_execution_id,
-            status=FLIGHT_PLAN_STATUS_COMPLETED,
+            status=(
+                FLIGHT_PLAN_STATUS_COMPLETED
+                if is_final_flight_execution
+                else FLIGHT_PLAN_STATUS_ACTIVE
+            ),
         )
 
         LOGGER.warning(
@@ -1118,7 +1218,9 @@ def run_navproxy_process(
             context.flight_id,
         )
 
-        return
+        return FlightExecutionResult(
+            completed=True,
+        )
 
     if (
         postflight_result.status
@@ -1135,7 +1237,9 @@ def run_navproxy_process(
             context.flight_execution_id,
             context.flight_id,
         )
-        return
+        return FlightExecutionResult(
+            completed=False,
+        )
 
     flight_log_id = append_flight_log(
         context=context,
@@ -1150,11 +1254,12 @@ def run_navproxy_process(
         flight_log_id,
     )
 
-    callback_status = (
-        FLIGHT_PLAN_STATUS_SUBMITTED
-        if requested_departure_datetime is None
-        else FLIGHT_PLAN_STATUS_COMPLETED
-    )
+    if requested_departure_datetime is None:
+        callback_status = FLIGHT_PLAN_STATUS_SUBMITTED
+    elif is_final_flight_execution:
+        callback_status = FLIGHT_PLAN_STATUS_COMPLETED
+    else:
+        callback_status = FLIGHT_PLAN_STATUS_ACTIVE
 
     notify_flight_plan_status(
         flight_execution_id=context.flight_execution_id,
@@ -1167,9 +1272,18 @@ def run_navproxy_process(
         context.flight_id,
     )
 
+    return FlightExecutionResult(
+        completed=True,
+    )
+
 
 def _start_flight(context: FlightProcessContext) -> None:
     """Record takeoff and notify Drupal that the flight is active."""
+
+    update_requested_departure_datetime(
+        context.flight_execution_id,
+        datetime.now(timezone.utc),
+    )
 
     flight_log_id = append_flight_log(
         context=context,
