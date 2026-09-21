@@ -44,6 +44,7 @@ from .settings import (
     FLIGHT_PLAN_STATUS_COMPLETED,
     FLIGHT_PLAN_STATUS_SUBMITTED,
     FLIGHT_PLAN_STATUS_HOLDING,
+    FLIGHT_PLAN_STATUS_EXPIRED,
 )
 from .simulator import FlightSimulator, TelemetryReading
 from app.navproxy.mavlink_telemetry import (
@@ -222,6 +223,10 @@ def run_navproxy_process(
     )
 
     if next_flight_execution is None:
+        notify_flight_plan_status(
+            flight_execution_id=flight_execution_id,
+            status=FLIGHT_PLAN_STATUS_EXPIRED,
+        )
         LOGGER.info(
             "VIA continuation was not resumed before expiration: "
             "root=%s current=%s",
@@ -1030,7 +1035,10 @@ def _execute_flight_execution(
                         "Route lane conformance violation: "
                         "lane_offset_ft=%s allowed_offset_ft=%s "
                         "segment_index=%s next_lane_offset_ft=%s "
-                        "next_segment_index=%s sequence=%s",
+                        "next_segment_index=%s sequence=%s "
+                        "position=[%s,%s] "
+                        "segment=[%s,%s] "
+                        "next_segment=[%s,%s]",
                         lane_conformance["distance_ft"],
                         lane_conformance["half_width_ft"],
                         segment["route_segment_index"],
@@ -1045,6 +1053,20 @@ def _execute_flight_execution(
                             else None
                         ),
                         telemetry.mission_sequence,
+                        telemetry.longitude,
+                        telemetry.latitude,
+                        segment["operational_start_coordinate"],
+                        segment["operational_end_coordinate"],
+                        (
+                            next_segment["operational_start_coordinate"]
+                            if next_lane_conformance is not None
+                            else None
+                        ),
+                        (
+                            next_segment["operational_end_coordinate"]
+                            if next_lane_conformance is not None
+                            else None
+                        ),
                     )
 
                     append_flight_log(
