@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import requests
+import time
 
 from .actual_path_sampler import ActualPathSampler
 from .actual_path_service import (
@@ -25,6 +26,8 @@ from app.config.constants import (
     LAUNCH_WINDOW_EXPIRES_MINUTES,
     LAUNCH_WINDOW_PREFLIGHT_MINUTES,
     MIN_OPPOSING_LANE_CLEARANCE_FT,
+    VIA_RESUME_POLL_SECONDS,
+    SCHEDULER_EXPIRATION_GRACE_MINUTES,
 )
 
 from . import constants
@@ -40,6 +43,7 @@ from .settings import (
     FLIGHT_PLAN_STATUS_ACTIVE,
     FLIGHT_PLAN_STATUS_COMPLETED,
     FLIGHT_PLAN_STATUS_SUBMITTED,
+    FLIGHT_PLAN_STATUS_HOLDING,
 )
 from .simulator import FlightSimulator, TelemetryReading
 from app.navproxy.mavlink_telemetry import (
@@ -152,6 +156,30 @@ class FlightExecutionResult:
     completed: bool
 
 
+def wait_for_via_resume(
+    root_flight_execution_id: str,
+    current_flight_execution_id: str,
+    deadline: datetime,
+) -> dict[str, Any] | None:
+    """Wait for the next VIA Flight Execution to be resumed."""
+
+    while datetime.now(timezone.utc) < deadline:
+        next_flight_execution = load_next_flight_execution(
+            root_flight_execution_id=root_flight_execution_id,
+            current_flight_execution_id=current_flight_execution_id,
+        )
+
+        if next_flight_execution is None:
+            return None
+
+        if next_flight_execution["via_status"] == "resumed":
+            return next_flight_execution
+
+        time.sleep(VIA_RESUME_POLL_SECONDS)
+
+    return None
+
+
 def run_navproxy_process(
     flight_execution_id: str,
     flight_id: str,
@@ -180,6 +208,26 @@ def run_navproxy_process(
         return
 
     if next_flight_execution is None:
+        return
+
+    via_resume_deadline = (
+        datetime.now(timezone.utc)
+        + timedelta(minutes=SCHEDULER_EXPIRATION_GRACE_MINUTES)
+    )
+
+    next_flight_execution = wait_for_via_resume(
+        root_flight_execution_id=flight_execution_id,
+        current_flight_execution_id=flight_execution_id,
+        deadline=via_resume_deadline,
+    )
+
+    if next_flight_execution is None:
+        LOGGER.info(
+            "VIA continuation was not resumed before expiration: "
+            "root=%s current=%s",
+            flight_execution_id,
+            flight_execution_id,
+        )
         return
 
     next_flight = dispatch_child_flight_execution(
@@ -1259,7 +1307,7 @@ def _execute_flight_execution(
     elif is_final_flight_execution:
         callback_status = FLIGHT_PLAN_STATUS_COMPLETED
     else:
-        callback_status = FLIGHT_PLAN_STATUS_ACTIVE
+        callback_status = FLIGHT_PLAN_STATUS_HOLDING
 
     notify_flight_plan_status(
         flight_execution_id=context.flight_execution_id,
