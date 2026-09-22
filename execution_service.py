@@ -189,83 +189,81 @@ def run_navproxy_process(
 ) -> None:
     """Run one NAVProxy-controlled scheduled flight."""
 
-    next_flight_execution = load_next_flight_execution(
-        root_flight_execution_id=flight_execution_id,
-        current_flight_execution_id=flight_execution_id,
-    )
+    root_flight_execution_id = flight_execution_id
+    current_flight_execution_id = flight_execution_id
+    current_flight_id = flight_id
 
-    result = _execute_flight_execution(
-        root_flight_execution_id=flight_execution_id,
-        flight_execution_id=flight_execution_id,
-        flight_id=flight_id,
-        is_final_flight_execution=(
-            next_flight_execution is None
-        ),
-        preflight_seconds=preflight_seconds,
-        flight_seconds=flight_seconds,
-    )
-
-    if not result.completed:
-        return
-
-    if next_flight_execution is None:
-        return
-
-    via_resume_deadline = (
-        datetime.now(timezone.utc)
-        + timedelta(minutes=SCHEDULER_EXPIRATION_GRACE_MINUTES)
-    )
-
-    next_flight_execution = wait_for_via_resume(
-        root_flight_execution_id=flight_execution_id,
-        current_flight_execution_id=flight_execution_id,
-        deadline=via_resume_deadline,
-    )
-
-    if next_flight_execution is None:
-        notify_flight_plan_status(
-            flight_execution_id=flight_execution_id,
-            status=FLIGHT_PLAN_STATUS_EXPIRED,
+    while True:
+        next_flight_execution = load_next_flight_execution(
+            root_flight_execution_id=root_flight_execution_id,
+            current_flight_execution_id=current_flight_execution_id,
         )
-        LOGGER.info(
-            "VIA continuation was not resumed before expiration: "
-            "root=%s current=%s",
-            flight_execution_id,
-            flight_execution_id,
-        )
-        return
 
-    next_flight = dispatch_child_flight_execution(
-        flight_execution_id=next_flight_execution[
+        result = _execute_flight_execution(
+            root_flight_execution_id=root_flight_execution_id,
+            flight_execution_id=current_flight_execution_id,
+            flight_id=current_flight_id,
+            is_final_flight_execution=(
+                next_flight_execution is None
+            ),
+            preflight_seconds=preflight_seconds,
+            flight_seconds=flight_seconds,
+        )
+
+        if not result.completed:
+            return
+
+        if next_flight_execution is None:
+            return
+
+        via_resume_deadline = (
+            datetime.now(timezone.utc)
+            + timedelta(
+                minutes=SCHEDULER_EXPIRATION_GRACE_MINUTES
+            )
+        )
+
+        next_flight_execution = wait_for_via_resume(
+            root_flight_execution_id=root_flight_execution_id,
+            current_flight_execution_id=current_flight_execution_id,
+            deadline=via_resume_deadline,
+        )
+
+        if next_flight_execution is None:
+            notify_flight_plan_status(
+                flight_execution_id=root_flight_execution_id,
+                status=FLIGHT_PLAN_STATUS_EXPIRED,
+            )
+            LOGGER.info(
+                "VIA continuation was not resumed before expiration: "
+                "root=%s current=%s",
+                root_flight_execution_id,
+                current_flight_execution_id,
+            )
+            return
+
+        next_flight = dispatch_child_flight_execution(
+            flight_execution_id=next_flight_execution[
+                "flight_execution_id"
+            ],
+            aviator_id=next_flight_execution["aviator_id"],
+            aircraft_id=next_flight_execution["aircraft_id"],
+        )
+
+        if next_flight is None:
+            LOGGER.error(
+                "Could not dispatch child Flight Execution: "
+                "root=%s current=%s child=%s",
+                root_flight_execution_id,
+                current_flight_execution_id,
+                next_flight_execution["flight_execution_id"],
+            )
+            return
+
+        current_flight_execution_id = next_flight_execution[
             "flight_execution_id"
-        ],
-        aviator_id=next_flight_execution["aviator_id"],
-        aircraft_id=next_flight_execution["aircraft_id"],
-    )
-
-    if next_flight is None:
-        LOGGER.error(
-            "Could not dispatch child Flight Execution: "
-            "root=%s current=%s child=%s",
-            flight_execution_id,
-            flight_execution_id,
-            next_flight_execution["flight_execution_id"],
-        )
-        return
-
-    result = _execute_flight_execution(
-        root_flight_execution_id=flight_execution_id,
-        flight_execution_id=next_flight_execution[
-            "flight_execution_id"
-        ],
-        flight_id=str(next_flight["flight_id"]),
-        is_final_flight_execution=True,
-        preflight_seconds=preflight_seconds,
-        flight_seconds=flight_seconds,
-    )
-
-    if not result.completed:
-        return
+        ]
+        current_flight_id = str(next_flight["flight_id"])
 
 
 def _execute_flight_execution(
