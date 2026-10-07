@@ -1,23 +1,23 @@
-# DroneNav Traffic Confliction Rules
+# DroneNav Traffic Deconfliction Rules
 
 ## 1. Purpose
 
-DroneNav Traffic Confliction governs the simultaneous use of Routes by aircraft operating within Flight Bands.
+DroneNav Traffic Deconfliction governs the simultaneous use of Routes by aircraft operating within Flight Bands.
 
-Traffic confliction provides two independent forms of traffic control:
+Traffic deconfliction provides two independent forms of traffic control:
 
 1. **Route capacity control** — limits the total number of aircraft simultaneously active on a Route within a Flight Band.
 2. **Traffic separation** — assigns aircraft to vertical flight layers and permits reuse of those layers when sufficient longitudinal separation has been established.
 
-Traffic confliction operates on live operational state maintained in `route_occupancy_state`.
+Traffic deconfliction operates on live operational state maintained in `route_occupancy_state`.
 
 The occupancy table represents current traffic state. It is not a historical flight record.
 
 ---
 
-## 2. Traffic Confliction Scope
+## 2. Traffic Deconfliction Scope
 
-Traffic confliction decisions are scoped to the combination:
+Traffic deconfliction decisions are scoped to the combination:
 
 ```text
 Route + Flight Band
