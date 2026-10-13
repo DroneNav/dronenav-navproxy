@@ -56,6 +56,43 @@ def request_message_interval(
     )
 
 
+def request_ground_speed(
+    connection: mavutil.mavfile,
+    speed_m_s: float,
+) -> None:
+    """Request a ground-speed change during AUTO flight."""
+
+    connection.mav.command_long_send(
+        connection.target_system,
+        connection.target_component,
+        mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+        0,
+        1,          # Ground speed
+        speed_m_s,  # Meters per second
+        -1,         # No throttle change
+        0,
+        0,
+        0,
+        0,
+    )
+
+
+def request_flight_mode(
+    connection: mavutil.mavfile,
+    mode_name: str,
+) -> None:
+    """Request a flight-mode change without reading MAVLink messages."""
+
+    mode_mapping = connection.mode_mapping()
+
+    if mode_name not in mode_mapping:
+        raise ValueError(
+            f"Flight controller does not support mode '{mode_name}'."
+        )
+
+    connection.set_mode(mode_mapping[mode_name])
+
+
 class MavlinkTelemetrySource:
     """Produce normalized NAVProxy telemetry from a MAVLink flight controller."""
 
@@ -197,6 +234,7 @@ class MavlinkTelemetrySource:
         """Yield normalized telemetry readings from the flight controller."""
 
         armed = False
+        flight_mode: str | None = None
         mission_sequence: int | None = None
         last_heartbeat_at = time.monotonic()
         heartbeat_lost_at: float | None = None
@@ -285,6 +323,7 @@ class MavlinkTelemetrySource:
                     int(message.base_mode)
                     & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
                 )
+                flight_mode = mavutil.mode_string_v10(message)
                 continue
 
             if message_type == "MISSION_CURRENT":
@@ -334,5 +373,6 @@ class MavlinkTelemetrySource:
                 battery_percent=battery_percent,
                 navigation_health=navigation_health,
                 vehicle_health=vehicle_health,
+                flight_mode=flight_mode,
             )
 

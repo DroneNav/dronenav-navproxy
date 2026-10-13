@@ -104,7 +104,7 @@ def main() -> None:
 
                 channel.basic_nack(
                     delivery_tag=method.delivery_tag,
-                    requeue=True,
+                    requeue=False,
                 )
 
     except KeyboardInterrupt:

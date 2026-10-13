@@ -28,7 +28,7 @@ class TelemetryReading:
     energy_health: str | None = None
     navigation_health: str | None = None
     vehicle_health: str | None = None
-
+    flight_mode: str | None = None
 
 
 class FlightSimulator:

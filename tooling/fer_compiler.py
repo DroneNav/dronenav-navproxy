@@ -1380,12 +1380,27 @@ def build_managed_intersections(
         if topology.get("managed") is not True:
             continue
 
+        holding_field = (
+            "reverse_holding_coordinate"
+            if current_parameters["operational_reversed"]
+            else "forward_holding_coordinate"
+        )
+
+        holding_coordinate = current_parameters["segment_attributes"][-1].get(holding_field)
+
+        if holding_coordinate is None:
+            raise FlightExecutionCompileError(
+                "Managed intersection holding coordinate is missing "
+                f"for Route {current_parameters['route_id']}."
+            )
+
         managed_intersections.append({
             "route_node_id": str(route_node_id),
             "from_route_id": current_parameters["route_id"],
             "to_route_id": next_parameters["route_id"],
             "from_route_index": route_index,
             "to_route_index": route_index + 1,
+            "holding_coordinate": holding_coordinate,
         })
 
     return managed_intersections
@@ -1639,6 +1654,7 @@ def interpret_flight_execution(
         "flight_execution_id": flight_execution_id,
         "flight_band_id": flight_band_id,
         "assertions": assertions,
+        "assigned_relative_altitude_ft": assigned_relative_altitude_ft,
         "mission": {
             "minimum_agl_ft": minimum_agl_ft,
             "maximum_agl_ft": maximum_agl_ft,
