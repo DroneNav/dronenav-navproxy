@@ -593,6 +593,8 @@ def _execute_flight_execution(
     intersection_brake_requested = False
     intersection_brake_requested_at: float | None = None
     intersection_auto_resume_requested = False
+    last_logged_intersection_state = None
+    last_logged_intersection_route_node_id = None
 
     max_lane_offset_ft: float | None = None
     max_lane_offset_sequence: int | None = None
@@ -833,13 +835,25 @@ def _execute_flight_execution(
                 )
 
             if managed_intersection is not None:
-                LOGGER.debug(
-                    "Managed intersection: route_node_id=%s "
-                    "state=%s flight_execution_id=%s",
-                    managed_intersection["route_node_id"],
-                    intersection_state,
-                    context.flight_execution_id,
-                )
+                route_node_id = managed_intersection["route_node_id"]
+
+                if (
+                    intersection_state != last_logged_intersection_state
+                    or route_node_id != last_logged_intersection_route_node_id
+                ):
+                    LOGGER.debug(
+                        "Managed intersection: route_node_id=%s "
+                        "state=%s flight_execution_id=%s",
+                        route_node_id,
+                        intersection_state,
+                        context.flight_execution_id,
+                    )
+
+                    last_logged_intersection_state = intersection_state
+                    last_logged_intersection_route_node_id = route_node_id
+            else:
+                last_logged_intersection_state = None
+                last_logged_intersection_route_node_id = None
 
             intersection_hold_required = (
                 managed_intersection is not None

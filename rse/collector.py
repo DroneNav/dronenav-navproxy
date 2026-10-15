@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import ssl
-
 import pika
+import math
 
 from app.config.database import engine
 
@@ -14,12 +14,11 @@ from app.navproxy.telemetry_publisher import (
     RABBITMQ_VHOST,
     get_rabbitmq_credentials,
 )
-from app.models.route_model import (
-    count_routes_for_route_node,
-    select_shared_route_node,
-)
 from app.models.flight_execution_model import (
     select_flight_execution_route_ranges,
+)
+from app.models.intersection_state_model import (
+    select_intersection_state,
 )
 from app.models.route_occupancy_state_model import (
     select_route_occupancy_state,
@@ -184,23 +183,69 @@ def get_managed_intersection_route_node(
     route: dict,
     next_route: dict | None,
 ):
-    """Return the managed shared Route Node, if any."""
+    """Return the cached managed intersection Route Node."""
 
     if next_route is None:
         return None
 
-    route_node_id = select_shared_route_node(
-        route["route_id"],
-        next_route["route_id"],
+    return route.get("intersection_route_node_id")
+
+
+def distance_between_coordinates_ft(
+    latitude_1: float,
+    longitude_1: float,
+    latitude_2: float,
+    longitude_2: float,
+) -> float:
+    """Calculate great-circle distance between coordinates in feet."""
+
+    earth_radius_ft = 20925524.9
+
+    lat1 = math.radians(latitude_1)
+    lat2 = math.radians(latitude_2)
+    delta_lat = math.radians(latitude_2 - latitude_1)
+    delta_lon = math.radians(longitude_2 - longitude_1)
+
+    a = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1)
+        * math.cos(lat2)
+        * math.sin(delta_lon / 2) ** 2
     )
 
-    if route_node_id is None:
-        return None
+    return (
+        2
+        * earth_radius_ft
+        * math.asin(min(1.0, math.sqrt(a)))
+    )
 
-    if count_routes_for_route_node(route_node_id) <= 2:
-        return None
 
-    return route_node_id
+def is_outside_intersection_radius(
+    route: dict,
+    latitude: float,
+    longitude: float,
+) -> bool:
+    """Check whether telemetry is outside the intersection radius."""
+
+    center_latitude = route.get("intersection_latitude")
+    center_longitude = route.get("intersection_longitude")
+    diameter_ft = route.get("intersection_diameter_ft")
+
+    if (
+        center_latitude is None
+        or center_longitude is None
+        or diameter_ft is None
+    ):
+        return False
+
+    distance_ft = distance_between_coordinates_ft(
+        latitude,
+        longitude,
+        center_latitude,
+        center_longitude,
+    )
+
+    return distance_ft > diameter_ft / 2.0
 
 
 def process_telemetry(message: dict) -> None:
@@ -235,6 +280,65 @@ def process_telemetry(message: dict) -> None:
 
     if route is None:
         return
+
+    incoming_intersection_route = (
+        previous_route
+        if (
+            previous_route is not None
+            and previous_route.get("intersection_route_node_id") is not None
+        )
+        else None
+    )
+
+    outgoing_intersection_route = (
+        route
+        if (
+            next_route is not None
+            and route.get("intersection_route_node_id") is not None
+        )
+        else None
+    )
+
+    is_inside_incoming_intersection = (
+        incoming_intersection_route is not None
+        and incoming_intersection_route.get(
+            "intersection_latitude"
+        ) is not None
+        and incoming_intersection_route.get(
+            "intersection_longitude"
+        ) is not None
+        and incoming_intersection_route.get(
+            "intersection_diameter_ft"
+        ) is not None
+        and not is_outside_intersection_radius(
+            incoming_intersection_route,
+            message["latitude"],
+            message["longitude"],
+        )
+    )
+
+    is_inside_outgoing_intersection = (
+        outgoing_intersection_route is not None
+        and outgoing_intersection_route.get(
+            "intersection_latitude"
+        ) is not None
+        and outgoing_intersection_route.get(
+            "intersection_longitude"
+        ) is not None
+        and outgoing_intersection_route.get(
+            "intersection_diameter_ft"
+        ) is not None
+        and not is_outside_intersection_radius(
+            outgoing_intersection_route,
+            message["latitude"],
+            message["longitude"],
+        )
+    )
+
+    is_inside_intersection_radius = (
+        is_inside_incoming_intersection
+        or is_inside_outgoing_intersection
+    )
 
     route_id = route["route_id"]
 
@@ -285,8 +389,24 @@ def process_telemetry(message: dict) -> None:
             )
         )
 
+    is_incoming_clearance_candidate = (
+        incoming_intersection_route is not None
+        and not is_inside_incoming_intersection
+        and incoming_intersection_route.get(
+            "intersection_latitude"
+        ) is not None
+        and incoming_intersection_route.get(
+            "intersection_longitude"
+        ) is not None
+        and incoming_intersection_route.get(
+            "intersection_diameter_ft"
+        ) is not None
+    )
+
     if (
         not is_final_route_exit
+        and not is_inside_intersection_radius
+        and not is_incoming_clearance_candidate
         and isinstance(segment_mission_sequences, list)
         and segment_mission_sequences
         and int(mission_sequence)
@@ -302,8 +422,15 @@ def process_telemetry(message: dict) -> None:
         last_processed_segment_sequence is not None
         and last_processed_segment_sequence
         == int(mission_sequence)
+        and not is_inside_intersection_radius
+        and not is_incoming_clearance_candidate
     ):
         return
+
+    is_new_segment_sequence = (
+        last_processed_segment_sequence is None
+        or last_processed_segment_sequence != int(mission_sequence)
+    )
 
     intersection_occupancy = None
 
@@ -318,14 +445,189 @@ def process_telemetry(message: dict) -> None:
                 )
             )
 
-        previous_intersection_state_id = None
+        incoming_route_node_id = None
 
-        if previous_route is not None:
-            previous_intersection_state_id = (
-                previous_route.get("_intersection_state_id")
+        if incoming_intersection_route is not None:
+            incoming_route_node_id = (
+                incoming_intersection_route.get(
+                    "intersection_route_node_id"
+                )
             )
 
-        if previous_intersection_state_id is not None:
+        intersection_from_route = None
+        intersection_to_route = None
+
+        outgoing_route_node_id = None
+
+        if outgoing_intersection_route is not None:
+            outgoing_route_node_id = (
+                outgoing_intersection_route.get(
+                    "intersection_route_node_id"
+                )
+            )
+
+        if incoming_route_node_id is not None:
+            intersection_from_route = previous_route
+            intersection_to_route = route
+
+        if (
+            is_new_segment_sequence
+            and managed_route_node_id is not None
+            and intersection_occupancy is not None
+        ):
+            intersection_state_id = reserve_intersection_slot(
+                connection,
+                route_node_id=managed_route_node_id,
+                flight_band_id=intersection_occupancy[
+                    "flight_band_id"
+                ],
+                assigned_relative_altitude_ft=int(
+                    intersection_occupancy[
+                        "assigned_relative_altitude_ft"
+                    ]
+                ),
+                flight_execution_id=flight_execution_id,
+                from_route_id=route["route_id"],
+                to_route_id=next_route["route_id"],
+            )
+
+            if intersection_state_id is not None:
+                LOGGER.info(
+                    "Managed intersection reserved: "
+                    "flight_execution_id=%s "
+                    "route_node_id=%s "
+                    "from_route_id=%s "
+                    "to_route_id=%s "
+                    "intersection_state_id=%s",
+                    flight_execution_id,
+                    managed_route_node_id,
+                    route["route_id"],
+                    next_route["route_id"],
+                    intersection_state_id,
+                )
+
+        outgoing_occupancy = intersection_occupancy
+
+        if (
+            outgoing_occupancy is None
+            and outgoing_route_node_id is not None
+            and is_inside_outgoing_intersection
+        ):
+            outgoing_occupancy = select_route_occupancy_state(
+                connection,
+                route_id=route_id,
+                flight_execution_id=flight_execution_id,
+            )
+
+        outgoing_intersection_state = None
+
+        if (
+            outgoing_occupancy is not None
+            and is_inside_outgoing_intersection
+        ):
+            outgoing_intersection_state = select_intersection_state(
+                connection,
+                route_node_id=outgoing_route_node_id,
+                flight_band_id=outgoing_occupancy["flight_band_id"],
+                assigned_relative_altitude_ft=int(
+                    outgoing_occupancy[
+                        "assigned_relative_altitude_ft"
+                    ]
+                ),
+            )
+
+        outgoing_reserved_state_id = None
+
+        if (
+            outgoing_intersection_state is not None
+            and outgoing_intersection_state["state"] == "reserved"
+            and str(outgoing_intersection_state["flight_execution_id"])
+            == str(flight_execution_id)
+            and str(outgoing_intersection_state["from_route_id"])
+            == str(route["route_id"])
+            and str(outgoing_intersection_state["to_route_id"])
+            == str(next_route["route_id"])
+        ):
+            outgoing_reserved_state_id = (
+                outgoing_intersection_state["intersection_state_id"]
+            )
+
+        if outgoing_reserved_state_id is not None:
+            occupied_state_id = occupy_intersection_slot(
+                connection,
+                intersection_state_id=outgoing_reserved_state_id,
+                flight_execution_id=flight_execution_id,
+            )
+
+            if occupied_state_id is not None:
+                LOGGER.info(
+                    "Managed outgoing intersection occupied: "
+                    "flight_execution_id=%s "
+                    "intersection_state_id=%s "
+                    "latitude=%.8f longitude=%.8f "
+                    "distance_ft=%.2f radius_ft=%.2f",
+                    flight_execution_id,
+                    occupied_state_id,
+                    message["latitude"],
+                    message["longitude"],
+                    distance_between_coordinates_ft(
+                        message["latitude"],
+                        message["longitude"],
+                        outgoing_intersection_route["intersection_latitude"],
+                        outgoing_intersection_route["intersection_longitude"],
+                    ),
+                    outgoing_intersection_route["intersection_diameter_ft"] / 2.0,
+                )
+
+        previous_occupancy = None
+        previous_intersection_state_id = None
+        intersection_state = None
+
+        if (
+            incoming_route_node_id is not None
+            and intersection_from_route is not None
+            and intersection_to_route is not None
+            and (
+                is_inside_incoming_intersection
+                or is_incoming_clearance_candidate
+            )
+        ):
+            previous_occupancy = select_route_occupancy_state(
+                connection,
+                route_id=intersection_from_route["route_id"],
+                flight_execution_id=flight_execution_id,
+            )
+
+            if previous_occupancy is not None:
+                intersection_state = select_intersection_state(
+                    connection,
+                    route_node_id=incoming_route_node_id,
+                    flight_band_id=previous_occupancy["flight_band_id"],
+                    assigned_relative_altitude_ft=int(
+                        previous_occupancy[
+                            "assigned_relative_altitude_ft"
+                        ]
+                    ),
+                )
+
+                if (
+                    intersection_state is not None
+                    and intersection_state["state"] == "reserved"
+                    and str(intersection_state["flight_execution_id"])
+                    == str(flight_execution_id)
+                    and str(intersection_state["from_route_id"])
+                    == str(intersection_from_route["route_id"])
+                    and str(intersection_state["to_route_id"])
+                    == str(intersection_to_route["route_id"])
+                ):
+                    previous_intersection_state_id = (
+                        intersection_state["intersection_state_id"]
+                    )
+
+        if (
+            previous_intersection_state_id is not None
+            and is_inside_incoming_intersection
+        ):
             occupied_intersection_state_id = (
                 occupy_intersection_slot(
                     connection,
@@ -337,25 +639,55 @@ def process_telemetry(message: dict) -> None:
             )
 
             if occupied_intersection_state_id is not None:
-                previous_route.pop(
-                    "_intersection_state_id",
-                    None,
-                )
-                route["_occupied_intersection_state_id"] = (
-                    occupied_intersection_state_id
-                )
+                intersection_state = dict(intersection_state)
+                intersection_state["state"] = "occupied"
 
                 LOGGER.info(
                     "Managed intersection occupied: "
                     "flight_execution_id=%s "
-                    "intersection_state_id=%s",
+                    "intersection_state_id=%s "
+                    "latitude=%.8f longitude=%.8f "
+                    "distance_ft=%.2f radius_ft=%.2f",
                     flight_execution_id,
                     occupied_intersection_state_id,
+                    message["latitude"],
+                    message["longitude"],
+                    distance_between_coordinates_ft(
+                        message["latitude"],
+                        message["longitude"],
+                        incoming_intersection_route[
+                            "intersection_latitude"
+                        ],
+                        incoming_intersection_route[
+                            "intersection_longitude"
+                        ],
+                    ),
+                    incoming_intersection_route[
+                        "intersection_diameter_ft"
+                    ] / 2.0,
                 )
 
-        occupied_intersection_state_id = (
-            route.get("_occupied_intersection_state_id")
-        )
+        occupied_intersection_state_id = None
+
+        if (
+            incoming_route_node_id is not None
+            and intersection_from_route is not None
+            and intersection_to_route is not None
+            and previous_occupancy is not None
+        ):
+            if (
+                intersection_state is not None
+                and intersection_state["state"] == "occupied"
+                and str(intersection_state["flight_execution_id"])
+                == str(flight_execution_id)
+                and str(intersection_state["from_route_id"])
+                == str(intersection_from_route["route_id"])
+                and str(intersection_state["to_route_id"])
+                == str(intersection_to_route["route_id"])
+            ):
+                occupied_intersection_state_id = (
+                    intersection_state["intersection_state_id"]
+                )
 
         segment_mission_sequences = route.get(
             "segment_mission_sequences"
@@ -363,10 +695,9 @@ def process_telemetry(message: dict) -> None:
 
         is_beyond_intersection = (
             occupied_intersection_state_id is not None
-            and isinstance(segment_mission_sequences, list)
-            and len(segment_mission_sequences) > 1
-            and int(mission_sequence)
-            == segment_mission_sequences[1]
+            and is_incoming_clearance_candidate
+            and previous_route is not None
+            and route is intersection_to_route
         )
 
         if is_beyond_intersection:
@@ -381,76 +712,55 @@ def process_telemetry(message: dict) -> None:
             )
 
             if cleared_intersection_state_id is not None:
-                route.pop(
-                    "_occupied_intersection_state_id",
-                    None,
-                )
-
                 LOGGER.info(
                     "Managed intersection cleared: "
                     "flight_execution_id=%s "
-                    "intersection_state_id=%s",
+                    "intersection_state_id=%s "
+                    "latitude=%.8f longitude=%.8f "
+                    "distance_ft=%.2f radius_ft=%.2f",
                     flight_execution_id,
                     cleared_intersection_state_id,
+                    message["latitude"],
+                    message["longitude"],
+                    distance_between_coordinates_ft(
+                        message["latitude"],
+                        message["longitude"],
+                        incoming_intersection_route[
+                            "intersection_latitude"
+                        ],
+                        incoming_intersection_route[
+                            "intersection_longitude"
+                        ],
+                    ),
+                    incoming_intersection_route[
+                        "intersection_diameter_ft"
+                    ] / 2.0,
                 )
 
-        if previous_route_id is not None:
+        if is_new_segment_sequence and previous_route_id is not None:
             update_route_occupancy_state(
                 connection,
                 route_id=previous_route_id,
                 flight_execution_id=flight_execution_id,
                 actual_exit_time=message["observed_at"],
+                last_state_change_at=message["observed_at"],
                 state="exited",
             )
 
-        update_route_occupancy_state(
-            connection,
-            route_id=route_id,
-            flight_execution_id=flight_execution_id,
-            actual_entry_time=message["observed_at"],
-            actual_exit_time=current_route_exit_time,
-            last_latitude=message["latitude"],
-            last_longitude=message["longitude"],
-            last_altitude_ft=message["relative_altitude_ft"],
-            state=current_route_state,
-        )
-
-    if (
-        managed_route_node_id is not None
-        and intersection_occupancy is not None
-    ):
-        intersection_state_id = reserve_intersection_slot(
-            route_node_id=managed_route_node_id,
-            flight_band_id=intersection_occupancy[
-                "flight_band_id"
-            ],
-            assigned_relative_altitude_ft=int(
-                intersection_occupancy[
-                    "assigned_relative_altitude_ft"
-                ]
-            ),
-            flight_execution_id=flight_execution_id,
-            from_route_id=route["route_id"],
-            to_route_id=next_route["route_id"],
-        )
-
-        if intersection_state_id is not None:
-            route["_intersection_state_id"] = (
-                intersection_state_id
+        if is_new_segment_sequence:
+            update_route_occupancy_state(
+                connection,
+                route_id=route_id,
+                flight_execution_id=flight_execution_id,
+                actual_entry_time=message["observed_at"],
+                actual_exit_time=current_route_exit_time,
+                last_latitude=message["latitude"],
+                last_longitude=message["longitude"],
+                last_altitude_ft=message["relative_altitude_ft"],
+                last_state_change_at=message["observed_at"],
+                state=current_route_state,
             )
-            LOGGER.info(
-                "Managed intersection reserved: "
-                "flight_execution_id=%s "
-                "route_node_id=%s "
-                "from_route_id=%s "
-                "to_route_id=%s "
-                "intersection_state_id=%s",
-                flight_execution_id,
-                managed_route_node_id,
-                route["route_id"],
-                next_route["route_id"],
-                intersection_state_id,
-            )
+
 
     route["_last_processed_segment_sequence"] = int(
         mission_sequence
