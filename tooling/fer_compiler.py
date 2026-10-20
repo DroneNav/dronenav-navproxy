@@ -1029,7 +1029,7 @@ def build_verified_route_mission_ranges(
     return route_ranges
 
 
-def insert_segment_speed_changes(
+def insert_flat_segment_speed_changes(
     mission_items: list[dict[str, Any]],
     route_conformance_segments: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1100,7 +1100,7 @@ def build_route_speed_limits(route_assertions: list[dict[str, Any]],
 
 def resolve_mission_altitude_band(
     flight_execution: dict[str, Any],
-) -> tuple[str, int | float, int | float]:
+) -> tuple[str, int | float, int | float, int | float]:
     """
     Resolve the Phase 2 mission altitude band from the single applicable
     Flight Band.
@@ -1141,6 +1141,17 @@ def resolve_mission_altitude_band(
     minimum_agl_ft = applicable_flight_band.get("min_agl_ft")
     maximum_agl_ft = applicable_flight_band.get("max_agl_ft")
     flight_band_id = applicable_flight_band.get("flight_band_id")
+    commanded_cruise_speed_ft_s = applicable_flight_band.get("commanded_cruise_speed_ft_s")
+
+    if (
+        isinstance(commanded_cruise_speed_ft_s, bool)
+        or not isinstance(commanded_cruise_speed_ft_s, (int, float))
+        or commanded_cruise_speed_ft_s <= 0
+    ):
+        raise FlightExecutionCompileError(
+            "Applicable Flight Band is missing a valid "
+            "commanded_cruise_speed_ft_s."
+        )
 
     if (
         isinstance(minimum_agl_ft, bool)
@@ -1160,7 +1171,12 @@ def resolve_mission_altitude_band(
             "Applicable Flight Band is missing a valid max_agl_ft."
         )
 
-    return flight_band_id, minimum_agl_ft, maximum_agl_ft
+    return (
+        flight_band_id,
+        minimum_agl_ft,
+        maximum_agl_ft,
+        commanded_cruise_speed_ft_s,
+    )
 
 
 def build_mission_items(
@@ -1265,12 +1281,6 @@ def build_mission_items(
                 "altitude_meters": altitude_meters,
             },
         })
-
-    mission_items = insert_segment_speed_changes(
-        mission_items,
-        route_conformance_segments,
-        route_waypoint_ranges,
-    )
 
     mission_items.append({
         "sequence": len(mission_items),
@@ -1736,7 +1746,7 @@ def build_transition_coordinate(
     ]
 
 
-def insert_segment_speed_changes(
+def insert_route_segment_speed_changes(
     mission_items: list[dict[str, Any]],
     route_conformance_segments: list[dict[str, Any]],
     route_waypoint_ranges: list[dict[str, int]],
@@ -2103,11 +2113,12 @@ def main() -> int:
                 "Input JSON is missing the flight_execution object."
             )
 
-        flight_band_id, minimum_agl_ft, maximum_agl_ft = (
-            resolve_mission_altitude_band(
-                flight_execution
-            )
-        )
+        (
+            flight_band_id,
+            minimum_agl_ft,
+            maximum_agl_ft,
+            commanded_cruise_speed_ft_s,
+        ) = resolve_mission_altitude_band( flight_execution )
 
         assigned_relative_altitude_ft = (
             minimum_agl_ft + VERTICAL_CONFORMANCE_MARGIN_FT

@@ -313,11 +313,13 @@ def _execute_flight_execution(
             flight_execution_id=flight_execution_id,
         )
 
-        flight_band_id, minimum_agl_ft, maximum_agl_ft = (
-            resolve_mission_altitude_band(
-                flight_execution
-            )
-        )
+        (
+            flight_band_id,
+            minimum_agl_ft,
+            maximum_agl_ft,
+            commanded_cruise_speed_ft_s,
+        ) = resolve_mission_altitude_band( flight_execution )
+
     except FlightExecutionCompileError:
         release_flight_execution(
             flight_execution_id,
@@ -799,6 +801,13 @@ def _execute_flight_execution(
                     active_operational_element="route",
                 )
 
+                if NAVPROXY_FC_MODE == "mavlink":
+                    request_ground_speed(
+                        connection,
+                        commanded_cruise_speed_ft_s * 0.3048,
+                    )
+                    cruise_speed_ft_s = commanded_cruise_speed_ft_s
+
                 LOGGER.debug(
                     "Transitioned from departure transition to Route authority."
                 )
@@ -857,6 +866,7 @@ def _execute_flight_execution(
 
             intersection_hold_required = (
                 managed_intersection is not None
+                and intersection_state is not None
                 and should_hold_for_intersection(intersection_state)
             )
 
@@ -905,6 +915,11 @@ def _execute_flight_execution(
 
                 commanded_speed_m_s = commanded_speed_ft_s * 0.3048
 
+                LOGGER.info(
+                    "Commanding intersection approach speed: %.2f ft/s",
+                    commanded_speed_ft_s,
+                )
+
                 request_ground_speed(
                     connection,
                     commanded_speed_m_s,
@@ -920,6 +935,11 @@ def _execute_flight_execution(
                 and telemetry.flight_mode == "AUTO"
                 and last_commanded_approach_speed_ft_s is not None
             ):
+
+                LOGGER.info(
+                    "Restoring Flight Band cruise speed: %.2f ft/s",
+                    cruise_speed_ft_s,
+                )
                 request_ground_speed(
                     connection,
                     cruise_speed_ft_s * 0.3048,
