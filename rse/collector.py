@@ -23,13 +23,19 @@ from app.models.intersection_state_model import (
 from app.models.route_occupancy_state_model import (
     select_route_occupancy_state,
     update_route_occupancy_state,
+    set_route_intersection_hold,
+    clear_route_intersection_hold,
+    select_next_intersection_hold,
 )
 from app.services.intersection_state_service import (
     clear_intersection_slot,
     occupy_intersection_slot,
     reserve_intersection_slot,
 )
-
+from app.models.intersection_state_model import (
+    select_intersection_state,
+    lock_intersection_slot,
+)
 
 FER_ROUTE_RANGE_CACHE: dict[
     str,
@@ -90,7 +96,20 @@ def main() -> None:
                     body.decode("utf-8")
                 )
 
-                process_telemetry(message)
+                navproxy_messages = process_telemetry(message)
+
+                for navproxy_message in navproxy_messages or []:
+                    channel.basic_publish(
+                        exchange="dronenav.control",
+                        routing_key=(
+                            "navproxy." + navproxy_message["flight_execution_id"]
+                        ),
+                        body=json.dumps(navproxy_message),
+                        properties=pika.BasicProperties(
+                            content_type="application/json",
+                            delivery_mode=2,
+                        ),
+                    )
 
                 channel.basic_ack(
                     delivery_tag=method.delivery_tag
@@ -179,6 +198,22 @@ def get_route_for_mission_sequence(
     return None, None, None
 
 
+def get_next_route_for_route_id(
+    route_ranges: list[dict],
+    route_id,
+):
+    """Return the Route immediately following the specified Route."""
+
+    for index, route in enumerate(route_ranges):
+        if str(route["route_id"]) == str(route_id):
+            if index + 1 < len(route_ranges):
+                return route_ranges[index + 1]
+
+            return None
+
+    return None
+
+
 def get_managed_intersection_route_node(
     route: dict,
     next_route: dict | None,
@@ -248,7 +283,7 @@ def is_outside_intersection_radius(
     return distance_ft > diameter_ft / 2.0
 
 
-def process_telemetry(message: dict) -> None:
+def process_telemetry(message: dict) -> list[dict] | None:
     """
     Process a raw telemetry observation.
     """
@@ -433,6 +468,7 @@ def process_telemetry(message: dict) -> None:
     )
 
     intersection_occupancy = None
+    navproxy_messages = []
 
     with engine.begin() as connection:
 
@@ -492,6 +528,15 @@ def process_telemetry(message: dict) -> None:
             )
 
             if intersection_state_id is not None:
+                navproxy_messages.append({
+                    "message_type": "intersection.granted",
+                    "flight_execution_id": str(flight_execution_id),
+                    "payload": {
+                        "route_node_id": str(managed_route_node_id),
+                        "intersection_state_id": str(intersection_state_id),
+                    },
+                })
+
                 LOGGER.info(
                     "Managed intersection reserved: "
                     "flight_execution_id=%s "
@@ -505,6 +550,32 @@ def process_telemetry(message: dict) -> None:
                     next_route["route_id"],
                     intersection_state_id,
                 )
+            else:
+                hold_state_id = set_route_intersection_hold(
+                    connection,
+                    route_id=route["route_id"],
+                    flight_execution_id=flight_execution_id,
+                    route_node_id=managed_route_node_id,
+                )
+
+                if hold_state_id is None:
+                    LOGGER.error(
+                        "Failed to record intersection HOLD: "
+                        "flight_execution_id=%s route_id=%s "
+                        "route_node_id=%s",
+                        flight_execution_id,
+                        route["route_id"],
+                        managed_route_node_id,
+                    )
+                else:
+                    LOGGER.info(
+                        "Managed intersection HOLD recorded: "
+                        "flight_execution_id=%s route_id=%s "
+                        "route_node_id=%s",
+                        flight_execution_id,
+                        route["route_id"],
+                        managed_route_node_id,
+                    )
 
         outgoing_occupancy = intersection_occupancy
 
@@ -701,6 +772,19 @@ def process_telemetry(message: dict) -> None:
         )
 
         if is_beyond_intersection:
+            lock_intersection_slot(
+                connection,
+                route_node_id=incoming_route_node_id,
+                flight_band_id=previous_occupancy[
+                    "flight_band_id"
+                ],
+                assigned_relative_altitude_ft=int(
+                    previous_occupancy[
+                        "assigned_relative_altitude_ft"
+                    ]
+                ),
+            )
+
             cleared_intersection_state_id = (
                 clear_intersection_slot(
                     connection,
@@ -712,6 +796,77 @@ def process_telemetry(message: dict) -> None:
             )
 
             if cleared_intersection_state_id is not None:
+                next_hold = select_next_intersection_hold(
+                    connection,
+                    route_node_id=incoming_route_node_id,
+                    flight_band_id=previous_occupancy[
+                        "flight_band_id"
+                    ],
+                    assigned_relative_altitude_ft=int(
+                        previous_occupancy[
+                            "assigned_relative_altitude_ft"
+                        ]
+                    ),
+                )
+
+                if next_hold is not None:
+                    waiting_route_ranges = get_fer_route_ranges(
+                        str(next_hold["flight_execution_id"])
+                    )
+
+                    waiting_next_route = get_next_route_for_route_id(
+                        waiting_route_ranges,
+                        next_hold["route_id"],
+                    )
+
+                    if waiting_next_route is not None:
+                        granted_state_id = reserve_intersection_slot(
+                            connection,
+                            route_node_id=incoming_route_node_id,
+                            flight_band_id=next_hold["flight_band_id"],
+                            assigned_relative_altitude_ft=int(
+                                next_hold["assigned_relative_altitude_ft"]
+                            ),
+                            flight_execution_id=next_hold[
+                                "flight_execution_id"
+                            ],
+                            from_route_id=next_hold["route_id"],
+                            to_route_id=waiting_next_route["route_id"],
+                        )
+
+                        if granted_state_id is not None:
+                            navproxy_messages.append({
+                                "message_type": "intersection.granted",
+                                "flight_execution_id": str(
+                                    next_hold["flight_execution_id"]
+                                ),
+                                "payload": {
+                                    "route_node_id": str(
+                                        incoming_route_node_id
+                                    ),
+                                    "intersection_state_id": str(
+                                        granted_state_id
+                                    ),
+                                },
+                            })
+
+                            clear_route_intersection_hold(
+                                connection,
+                                route_id=next_hold["route_id"],
+                                flight_execution_id=next_hold[
+                                    "flight_execution_id"
+                                ],
+                                route_node_id=incoming_route_node_id,
+                            )
+
+                            LOGGER.info(
+                                "Managed intersection FIFO grant: "
+                                "flight_execution_id=%s "
+                                "intersection_state_id=%s",
+                                next_hold["flight_execution_id"],
+                                granted_state_id,
+                            )
+
                 LOGGER.info(
                     "Managed intersection cleared: "
                     "flight_execution_id=%s "
@@ -766,7 +921,7 @@ def process_telemetry(message: dict) -> None:
         mission_sequence
     )
 
-    return
+    return navproxy_messages
 
 
 

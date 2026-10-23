@@ -17,6 +17,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -36,8 +37,10 @@ from app.navproxy.tooling.mavlink_emitter import (
 class MissionUploadError(RuntimeError):
     """Raised when a MAVLink mission cannot be uploaded."""
 
-
-DEFAULT_CONNECTION = "tcp:127.0.0.1:15762"
+DEFAULT_CONNECTION = os.environ.get(
+    "DRONENAV_MAVLINK_CONNECTION",
+    "tcp:127.0.0.1:15762",
+)
 DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 15.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 5.0
 DEFAULT_UPLOAD_TIMEOUT_SECONDS = 60.0

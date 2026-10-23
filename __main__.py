@@ -25,6 +25,11 @@ def _parse_arguments() -> argparse.Namespace:
         help="Flight UUID created during claim.",
     )
     parser.add_argument(
+        "--connection",
+        default=None,
+        help="MAVLink endpoint. Defaults to the configured connection.",
+    )
+    parser.add_argument(
         "--preflight-seconds",
         type=int,
         default=DEFAULT_PREFLIGHT_SECONDS,
@@ -69,6 +74,7 @@ def main() -> None:
             flight_id=arguments.flight_id,
             preflight_seconds=arguments.preflight_seconds,
             flight_seconds=arguments.flight_seconds,
+            connection_string=arguments.connection,
         )
 
 if __name__ == "__main__":

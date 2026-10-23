@@ -93,6 +93,30 @@ def request_flight_mode(
     connection.set_mode(mode_mapping[mode_name])
 
 
+def request_guided_position(
+    connection: mavutil.mavfile,
+    *,
+    longitude: float,
+    latitude: float,
+    altitude_msl_m: float,
+) -> None:
+    """Command an ArduPilot GUIDED destination using MSL altitude."""
+
+    connection.mav.set_position_target_global_int_send(
+        0,
+        connection.target_system,
+        connection.target_component,
+        mavutil.mavlink.MAV_FRAME_GLOBAL_INT,
+        0x0DF8,  # Position only; ignore velocity, acceleration, yaw.
+        int(latitude * 1e7),
+        int(longitude * 1e7),
+        altitude_msl_m,
+        0, 0, 0,
+        0, 0, 0,
+        0, 0,
+    )
+
+
 class MavlinkTelemetrySource:
     """Produce normalized NAVProxy telemetry from a MAVLink flight controller."""
 

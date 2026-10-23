@@ -33,7 +33,6 @@ from app.config.constants import (
 from . import constants
 from .queue_navigation import (
     calculate_coordinate_distance_ft,
-    calculate_queue_approach_speed,
     get_managed_intersection_for_segment,
     get_flight_intersection_state,
     should_hold_for_intersection,
@@ -59,6 +58,7 @@ from app.navproxy.mavlink_telemetry import (
     MavlinkTelemetrySource,
     request_ground_speed,
     request_flight_mode,
+    request_guided_position,
 )
 from .tooling.fer_compiler import (
     FlightExecutionCompileError,
@@ -107,6 +107,7 @@ from app.models.flight_execution_model import (
 from .flight_band_resolver import resolve_applicable_flight_band
 
 from app.navproxy.telemetry_publisher import TelemetryPublisher
+from app.navproxy.control_consumer import ControlConsumer
 
 from app.navproxy.rse.route_reservation import (
     RouteSlotReservationError,
@@ -190,12 +191,12 @@ def wait_for_via_resume(
 
     return None
 
-
 def run_navproxy_process(
     flight_execution_id: str,
     flight_id: str,
     preflight_seconds: int = DEFAULT_PREFLIGHT_SECONDS,
     flight_seconds: int = DEFAULT_FLIGHT_SECONDS,
+    connection_string: str | None = None,
 ) -> None:
     """Run one NAVProxy-controlled scheduled flight."""
 
@@ -218,6 +219,7 @@ def run_navproxy_process(
             ),
             preflight_seconds=preflight_seconds,
             flight_seconds=flight_seconds,
+            connection_string=connection_string,
         )
 
         if not result.completed:
@@ -283,8 +285,11 @@ def _execute_flight_execution(
     is_final_flight_execution: bool,
     preflight_seconds: int = DEFAULT_PREFLIGHT_SECONDS,
     flight_seconds: int = DEFAULT_FLIGHT_SECONDS,
+    connection_string: str | None = None,
 ) -> FlightExecutionResult:
     """Run one NAVProxy-controlled scheduled flight."""
+
+    connection_string = connection_string or DEFAULT_CONNECTION
 
     if NAVPROXY_FC_MODE not in {"simulator", "mavlink"}:
         raise RuntimeError(
@@ -518,7 +523,7 @@ def _execute_flight_execution(
 
     if NAVPROXY_FC_MODE == "mavlink":
         connection = connect_vehicle(
-            DEFAULT_CONNECTION,
+            connection_string,
             10.0,
         )
 
@@ -563,10 +568,18 @@ def _execute_flight_execution(
 
         mavlink_telemetry_source = MavlinkTelemetrySource(
             connection,
-            DEFAULT_CONNECTION,
+            connection_string,
         )
 
-    _start_flight(context)
+    control_consumer = ControlConsumer(
+        str(context.flight_execution_id)
+    )
+
+    try:
+        _start_flight(context)
+    except Exception:
+        control_consumer.close()
+        raise
 
     context = replace(
         context,
@@ -587,14 +600,14 @@ def _execute_flight_execution(
 
     last_telemetry: TelemetryReading | None = None
 
-    last_commanded_approach_speed_ft_s: float | None = None
-    approach_speed_command_threshold_ft_s = 1.0
-    minimum_approach_speed_ft_s = 3.28084
-    intersection_brake_trigger_ft = 3.0
-    intersection_brake_confirmation_timeout_seconds = 5.0
-    intersection_brake_requested = False
-    intersection_brake_requested_at: float | None = None
+    intersection_guided_requested = False
+    intersection_guided_target_sent = False
+    intersection_guided_requested_at: float | None = None
     intersection_auto_resume_requested = False
+    intersection_auto_resume_requested_at: float | None = None
+    intersection_grant_received_route_node_id = None
+    intersection_grant_delivery_tag = None
+    intersection_hold_completed_route_node_id = None
     last_logged_intersection_state = None
     last_logged_intersection_route_node_id = None
 
@@ -614,9 +627,40 @@ def _execute_flight_execution(
         for telemetry in telemetry_iterable:
             last_telemetry = telemetry
 
+            control_messages = control_consumer.receive()
+
+            for control_message in control_messages:
+                message = control_message["message"]
+
+                if (
+                    message.get("message_type") == "intersection.granted"
+                    and intersection_grant_delivery_tag is None
+                ):
+                    intersection_grant_received_route_node_id = (
+                        message["payload"]["route_node_id"]
+                    )
+                    intersection_grant_delivery_tag = (
+                        control_message["delivery_tag"]
+                    )
+                elif message.get("message_type") == "intersection.granted":
+                    if (
+                        message["payload"]["route_node_id"]
+                        == intersection_grant_received_route_node_id
+                    ):
+                        control_consumer.acknowledge(
+                            control_message["delivery_tag"]
+                        )
+                    else:
+                        raise RuntimeError(
+                            "Received a conflicting intersection grant "
+                            "while a previous grant is pending."
+                        )
+
             if (
                 NAVPROXY_FC_MODE == "mavlink"
                 and telemetry.mission_sequence is not None
+                and not intersection_guided_requested
+                and not intersection_auto_resume_requested
                 and mavlink_telemetry_source.consume_reconnect_flag()
             ):
                 route_segment_index = get_route_segment_index_for_mission_sequence(
@@ -624,7 +668,11 @@ def _execute_flight_execution(
                     telemetry.mission_sequence,
                 )
 
-                if route_segment_index is not None:
+                if (
+                    route_segment_index is not None
+                    and not intersection_guided_requested
+                    and not intersection_auto_resume_requested
+                ):
                     context = replace(
                         context,
                         active_route_segment_index=route_segment_index,
@@ -847,6 +895,26 @@ def _execute_flight_execution(
                 route_node_id = managed_intersection["route_node_id"]
 
                 if (
+                    last_logged_intersection_route_node_id == route_node_id
+                    and last_logged_intersection_state == "occupied"
+                    and intersection_state is None
+                ):
+                    intersection_hold_completed_route_node_id = (
+                        route_node_id
+                    )
+
+                    if (
+                        intersection_grant_delivery_tag is not None
+                        and intersection_grant_received_route_node_id
+                        == str(route_node_id)
+                    ):
+                        control_consumer.acknowledge(
+                            intersection_grant_delivery_tag
+                        )
+                        intersection_grant_received_route_node_id = None
+                        intersection_grant_delivery_tag = None
+
+                if (
                     intersection_state != last_logged_intersection_state
                     or route_node_id != last_logged_intersection_route_node_id
                 ):
@@ -866,123 +934,117 @@ def _execute_flight_execution(
 
             intersection_hold_required = (
                 managed_intersection is not None
-                and intersection_state is not None
                 and should_hold_for_intersection(intersection_state)
             )
 
-            distance_to_holding_ft = None
-
-            if intersection_hold_required:
-                distance_to_holding_ft = calculate_coordinate_distance_ft(
-                    [telemetry.longitude, telemetry.latitude],
-                    managed_intersection["holding_coordinate"],
-                )
-
-            target_approach_speed_ft_s = None
-
-            if ( distance_to_holding_ft is not None
-                  and cruise_speed_ft_s is not None):
-                target_approach_speed_ft_s = calculate_queue_approach_speed(
-                    distance_to_holding_ft=distance_to_holding_ft,
-                    cruise_speed_ft_s=cruise_speed_ft_s,
-                    deceleration_ft_s2=3.0,
-                    stopping_margin_ft=0.0,
-                )
-
-            approach_speed_command_required = (
-                NAVPROXY_FC_MODE == "mavlink"
-                and not intersection_brake_requested
-                and not intersection_auto_resume_requested
-                and telemetry.flight_mode == "AUTO"
-                and target_approach_speed_ft_s is not None
-                and (
-                    last_commanded_approach_speed_ft_s is None
-                    or abs(
-                        max(
-                            minimum_approach_speed_ft_s,
-                            target_approach_speed_ft_s,
-                        )
-                        - last_commanded_approach_speed_ft_s
-                    ) >= approach_speed_command_threshold_ft_s
-                )
-            )
-
-            if approach_speed_command_required:
-                commanded_speed_ft_s = max(
-                    minimum_approach_speed_ft_s,
-                    target_approach_speed_ft_s,
-                )
-
-                commanded_speed_m_s = commanded_speed_ft_s * 0.3048
-
-                LOGGER.info(
-                    "Commanding intersection approach speed: %.2f ft/s",
-                    commanded_speed_ft_s,
-                )
-
-                request_ground_speed(
-                    connection,
-                    commanded_speed_m_s,
-                )
-
-                last_commanded_approach_speed_ft_s = commanded_speed_ft_s
 
             if (
                 NAVPROXY_FC_MODE == "mavlink"
-                and managed_intersection is not None
-                and intersection_state == "occupied"
-                and not intersection_brake_requested
+                and intersection_hold_required
+                and not intersection_guided_requested
+                and (
+                    intersection_hold_completed_route_node_id
+                    != managed_intersection["route_node_id"]
+                )
                 and telemetry.flight_mode == "AUTO"
-                and last_commanded_approach_speed_ft_s is not None
             ):
-
                 LOGGER.info(
-                    "Restoring Flight Band cruise speed: %.2f ft/s",
-                    cruise_speed_ft_s,
+                    "Requesting GUIDED HOLD: route_node_id=%s",
+                    managed_intersection["route_node_id"],
                 )
-                request_ground_speed(
-                    connection,
-                    cruise_speed_ft_s * 0.3048,
-                )
-                last_commanded_approach_speed_ft_s = None
-
-            intersection_brake_required = (
-                intersection_hold_required
-                and distance_to_holding_ft is not None
-                and distance_to_holding_ft <= intersection_brake_trigger_ft
-            )
-
-            if ( NAVPROXY_FC_MODE == "mavlink"
-                 and intersection_brake_required
-                 and not intersection_brake_requested):
-                request_flight_mode(connection, "BRAKE")
-                intersection_brake_requested = True
-                intersection_brake_requested_at = time.monotonic()
+                request_flight_mode(connection, "GUIDED")
+                intersection_guided_requested = True
+                intersection_guided_requested_at = time.monotonic()
 
             if (
                 NAVPROXY_FC_MODE == "mavlink"
-                and intersection_brake_requested
-                and intersection_brake_requested_at is not None
-                and telemetry.flight_mode != "BRAKE"
+                and intersection_guided_requested
+                and not intersection_guided_target_sent
+                and intersection_hold_required
+                and telemetry.flight_mode == "GUIDED"
+            ):
+                holding_coordinate = managed_intersection[
+                    "holding_coordinate"
+                ]
+
+                altitude_msl_m = (
+                    segment["ground_elevation_ft"]
+                    + context.compiler_ir["assigned_relative_altitude_ft"]
+                ) * 0.3048
+
+                request_guided_position(
+                    connection,
+                    longitude=holding_coordinate[0],
+                    latitude=holding_coordinate[1],
+                    altitude_msl_m=altitude_msl_m,
+                )
+
+                LOGGER.info(
+                    "GUIDED HOLD target sent: longitude=%s latitude=%s "
+                    "altitude_msl_m=%.2f",
+                    holding_coordinate[0],
+                    holding_coordinate[1],
+                    altitude_msl_m,
+                )
+
+                intersection_guided_target_sent = True
+
+            if (
+                NAVPROXY_FC_MODE == "mavlink"
+                and intersection_guided_requested
+                and not intersection_guided_target_sent
+                and intersection_guided_requested_at is not None
+                and telemetry.flight_mode != "GUIDED"
                 and not intersection_auto_resume_requested
                 and (
-                    time.monotonic() - intersection_brake_requested_at
-                    >= intersection_brake_confirmation_timeout_seconds
+                    time.monotonic() - intersection_guided_requested_at
+                    >= 5.0
                 )
             ):
                 raise RuntimeError(
-                    "ArduPilot did not confirm BRAKE mode within 5 seconds."
+                    "ArduPilot did not confirm GUIDED mode within 5 seconds."
                 )
 
             if (
                 NAVPROXY_FC_MODE == "mavlink"
-                and intersection_brake_requested
-                and intersection_state == "occupied"
-                and telemetry.flight_mode == "BRAKE"
+                and intersection_guided_target_sent
+                and not intersection_auto_resume_requested
+                and telemetry.flight_mode != "GUIDED"
+            ):
+                raise RuntimeError(
+                    "ArduPilot unexpectedly exited GUIDED HOLD."
+                )
+
+            if (
+                NAVPROXY_FC_MODE == "mavlink"
+                and intersection_guided_requested
+                and intersection_grant_received_route_node_id is not None
+                and (
+                    intersection_grant_received_route_node_id
+                    == str(managed_intersection["route_node_id"])
+                )
+                and intersection_state in ("reserved", "occupied")
+                and telemetry.flight_mode == "GUIDED"
                 and not intersection_auto_resume_requested
             ):
+                LOGGER.info("Intersection cleared: requesting AUTO resume")
                 request_flight_mode(connection, "AUTO")
                 intersection_auto_resume_requested = True
+                intersection_auto_resume_requested_at = time.monotonic()
+
+            if (
+                NAVPROXY_FC_MODE == "mavlink"
+                and intersection_auto_resume_requested
+                and intersection_auto_resume_requested_at is not None
+                and telemetry.flight_mode != "AUTO"
+                and (
+                    time.monotonic() - intersection_auto_resume_requested_at
+                    >= 5.0
+                )
+            ):
+                raise RuntimeError(
+                    "ArduPilot did not confirm AUTO mode within 5 seconds."
+                )
 
             if (
                 NAVPROXY_FC_MODE == "mavlink"
@@ -995,11 +1057,21 @@ def _execute_flight_execution(
                     cruise_speed_ft_s * 0.3048,
                 )
 
-                intersection_auto_resume_requested = False
-                intersection_brake_requested = False
-                intersection_brake_requested_at = None
-                last_commanded_approach_speed_ft_s = None
+                if intersection_grant_delivery_tag is not None:
+                    control_consumer.acknowledge(
+                        intersection_grant_delivery_tag
+                    )
 
+                intersection_auto_resume_requested = False
+                intersection_auto_resume_requested_at = None
+                intersection_guided_requested = False
+                intersection_guided_target_sent = False
+                intersection_guided_requested_at = None
+                intersection_grant_received_route_node_id = None
+                intersection_grant_delivery_tag = None
+                intersection_hold_completed_route_node_id = (
+                    managed_intersection["route_node_id"]
+                )
 
             route_transition = None
 
@@ -1015,7 +1087,11 @@ def _execute_flight_execution(
                     segment,
                 )
 
-            if route_transition is not None:
+            if (
+                route_transition is not None
+                and not intersection_guided_requested
+                and not intersection_auto_resume_requested
+            ):
                 inside_route_transition = evaluate_transition_point_containment(
                     telemetry,
                     route_transition,
@@ -1024,7 +1100,11 @@ def _execute_flight_execution(
                 if inside_route_transition:
                     continue
 
-            if segment is not None:
+            if (
+                segment is not None
+                and not intersection_guided_requested
+                and not intersection_auto_resume_requested
+            ):
                 crossed = evaluate_route_segment_boundary_crossing(
                     telemetry,
                     segment,
@@ -1440,7 +1520,10 @@ def _execute_flight_execution(
         )
 
     finally:
-        telemetry_publisher.close()
+        try:
+            control_consumer.close()
+        finally:
+            telemetry_publisher.close()
 
         if connection is not None:
            try:

@@ -38,7 +38,10 @@ from app.services.elevation_service import (
 
 from app.navproxy.flight_band_resolver import resolve_applicable_flight_band
 
-from app.services.geometry_service import build_offset_polyline
+from app.services.geometry_service import (
+    build_offset_polyline,
+    offset_segment,
+)
 
 class FlightExecutionCompileError(ValueError):
     """Raised when a Flight Execution Record cannot be interpreted."""
@@ -1352,6 +1355,7 @@ def build_arrival_transition(
 
 def build_managed_intersections(
     route_assertions: list[dict[str, Any]],
+    side: str,
 ) -> list[dict[str, Any]]:
     """Build managed intersections along the ordered Route path."""
 
@@ -1403,6 +1407,26 @@ def build_managed_intersections(
                 "Managed intersection holding coordinate is missing "
                 f"for Route {current_parameters['route_id']}."
             )
+
+        coordinates = current_parameters["coordinates"]
+        route_width_ft = current_parameters["segment_attributes"][-1][
+            "route_width_ft"
+        ]
+
+        offset_ft = route_width_ft / 4.0
+        if side == "left":
+            offset_ft = -offset_ft
+
+        offset_start, offset_end = offset_segment(
+            coordinates[-2],
+            coordinates[-1],
+            offset_ft,
+        )
+
+        holding_coordinate = [
+            holding_coordinate[0] + offset_end[0] - coordinates[-1][0],
+            holding_coordinate[1] + offset_end[1] - coordinates[-1][1],
+        ]
 
         managed_intersections.append({
             "route_node_id": str(route_node_id),
@@ -1623,7 +1647,8 @@ def interpret_flight_execution(
     )
 
     managed_intersections = build_managed_intersections(
-        route_assertions
+        route_assertions,
+        side="right",
     )
 
     route_transitions = build_route_transitions(

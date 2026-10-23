@@ -92,6 +92,6 @@ def should_hold_for_intersection(
     intersection_state: str | None,
 ) -> bool:
     """Return whether intersection occupancy has not been assigned."""
-    return intersection_state != "occupied"
+    return intersection_state not in ("reserved", "occupied")
 
 
