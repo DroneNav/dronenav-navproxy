@@ -30,7 +30,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.config.constants import (
     DEFAULT_API_BASE_URL,
     DEFAULT_API_TIMEOUT_SECONDS,
-    TRANSITION_DIAMETER_FT,)
+    TRANSITION_DIAMETER_FT,
+    ROUTE_INTERSECTION_HOLDING_SETBACK_FT,
+)
 
 from app.services.elevation_service import (
     resolve_coordinate_elevation,
@@ -1428,6 +1430,18 @@ def build_managed_intersections(
             holding_coordinate[1] + offset_end[1] - coordinates[-1][1],
         ]
 
+        pause_setback_ft = TRANSITION_DIAMETER_FT / 2
+        hold_setback_ft = ROUTE_INTERSECTION_HOLDING_SETBACK_FT
+
+        test_pause_coordinate = [
+            offset_end[0]
+            + (holding_coordinate[0] - offset_end[0])
+            * pause_setback_ft / hold_setback_ft,
+            offset_end[1]
+            + (holding_coordinate[1] - offset_end[1])
+            * pause_setback_ft / hold_setback_ft,
+        ]
+
         managed_intersections.append({
             "route_node_id": str(route_node_id),
             "from_route_id": current_parameters["route_id"],
@@ -1435,6 +1449,7 @@ def build_managed_intersections(
             "from_route_index": route_index,
             "to_route_index": route_index + 1,
             "holding_coordinate": holding_coordinate,
+            "test_pause_coordinate": test_pause_coordinate,
         })
 
     return managed_intersections

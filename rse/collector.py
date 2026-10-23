@@ -5,6 +5,7 @@ import logging
 import ssl
 import pika
 import math
+import time
 
 from app.config.database import engine
 
@@ -23,6 +24,7 @@ from app.models.intersection_state_model import (
 from app.models.route_occupancy_state_model import (
     select_route_occupancy_state,
     update_route_occupancy_state,
+    update_active_route_position,
     set_route_intersection_hold,
     clear_route_intersection_hold,
     select_next_intersection_hold,
@@ -42,6 +44,7 @@ FER_ROUTE_RANGE_CACHE: dict[
     list[dict],
 ] = {}
 
+LAST_POSITION_UPDATE_AT: dict[str, float] = {}
 
 LOGGER = logging.getLogger(__name__)
 
@@ -448,6 +451,31 @@ def process_telemetry(message: dict) -> list[dict] | None:
         not in segment_mission_sequences
     ):
         return
+
+    position_update_key = str(flight_execution_id)
+    position_update_now = time.monotonic()
+
+    last_position_update_at = LAST_POSITION_UPDATE_AT.get(
+        position_update_key
+    )
+
+    if (
+        last_position_update_at is None
+        or position_update_now - last_position_update_at >= 1.0
+    ):
+        with engine.begin() as connection:
+            update_active_route_position(
+                connection,
+                route_id=route_id,
+                flight_execution_id=flight_execution_id,
+                latitude=message["latitude"],
+                longitude=message["longitude"],
+                altitude_ft=message["relative_altitude_ft"],
+            )
+
+        LAST_POSITION_UPDATE_AT[position_update_key] = (
+            position_update_now
+        )
 
     last_processed_segment_sequence = route.get(
         "_last_processed_segment_sequence"
