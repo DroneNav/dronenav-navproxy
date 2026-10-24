@@ -2,6 +2,11 @@ from app.config.database import engine
 from app.models.intersection_state_model import (
     select_flight_intersection_state,
 )
+from app.models.route_occupancy_state_model import (
+    select_route_occupancy_state,
+)
+
+from app.config.constants import AIRCRAFT_SEPARATION_DISTANCE_FT
 
 import math
 
@@ -32,6 +37,86 @@ def calculate_coordinate_distance_ft(
         * earth_radius_ft
         * math.asin(math.sqrt(min(1.0, max(0.0, a))))
     )
+
+
+def interpolate_coordinate(
+    start_coordinate: list[float],
+    end_coordinate: list[float],
+    fraction: float,
+) -> list[float]:
+    """Interpolate between two [longitude, latitude] coordinates."""
+
+    return [
+        start_coordinate[0]
+        + (end_coordinate[0] - start_coordinate[0]) * fraction,
+        start_coordinate[1]
+        + (end_coordinate[1] - start_coordinate[1]) * fraction,
+    ]
+
+
+def calculate_intersection_queue_coordinate(
+    *,
+    holding_coordinate: list[float],
+    hold_position: int,
+    route_index: int,
+    route_segments: list[dict],
+) -> list[float] | None:
+    """Calculate a fixed HOLD coordinate along the incoming Route."""
+
+    if hold_position < 1:
+        raise ValueError("HOLD position must be at least 1.")
+
+    if hold_position == 1:
+        return holding_coordinate
+
+    segments = sorted(
+        (
+            segment
+            for segment in route_segments
+            if segment["route_index"] == route_index
+        ),
+        key=lambda segment: segment["route_segment_index"],
+        reverse=True,
+    )
+
+    remaining_distance_ft = (
+        (hold_position - 1) * AIRCRAFT_SEPARATION_DISTANCE_FT
+    )
+
+    current_coordinate = holding_coordinate
+
+    for segment in segments:
+        start_coordinate = segment["operational_start_coordinate"]
+        end_coordinate = segment["operational_end_coordinate"]
+
+        segment_end = (
+            current_coordinate
+            if current_coordinate is not None
+            else end_coordinate
+        )
+
+        segment_distance_ft = calculate_coordinate_distance_ft(
+            start_coordinate,
+            segment_end,
+        )
+
+        if segment_distance_ft >= remaining_distance_ft:
+            fraction = (
+                1.0 - remaining_distance_ft / segment_distance_ft
+                if segment_distance_ft > 0
+                else 0.0
+            )
+
+            return interpolate_coordinate(
+                start_coordinate,
+                segment_end,
+                fraction,
+            )
+
+        remaining_distance_ft -= segment_distance_ft
+        current_coordinate = None
+
+    return None
 
 
 def calculate_queue_approach_speed(
@@ -72,6 +157,29 @@ def get_flight_intersection_state(
             assigned_relative_altitude_ft=assigned_relative_altitude_ft,
             flight_execution_id=flight_execution_id,
         )
+
+
+def get_flight_intersection_hold_position(
+    *,
+    route_id,
+    flight_execution_id,
+) -> int | None:
+    """Return the assigned intersection HOLD queue position."""
+
+    with engine.connect() as connection:
+        occupancy = select_route_occupancy_state(
+            connection,
+            route_id=route_id,
+            flight_execution_id=flight_execution_id,
+        )
+
+    if occupancy is None:
+        return None
+
+    if occupancy["intersection_hold_route_node_id"] is None:
+        return None
+
+    return occupancy["intersection_hold_position"]
 
 
 def get_managed_intersection_for_segment(

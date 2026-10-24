@@ -36,6 +36,8 @@ from .queue_navigation import (
     get_managed_intersection_for_segment,
     get_flight_intersection_state,
     should_hold_for_intersection,
+    get_flight_intersection_hold_position,
+    calculate_intersection_queue_coordinate,
 )
 from .drupal_update_status import notify_flight_plan_status
 from .flight_log_service import (
@@ -949,6 +951,16 @@ def _execute_flight_execution(
                 and should_hold_for_intersection(intersection_state)
             )
 
+            intersection_hold_position = None
+
+            if intersection_hold_required:
+                intersection_hold_position = (
+                    get_flight_intersection_hold_position(
+                        route_id=segment["route_id"],
+                        flight_execution_id=context.flight_execution_id,
+                    )
+                )
+
             test_pause_required = (
                 sitl_test_pause_enabled
                 and managed_intersection is not None
@@ -1080,6 +1092,7 @@ def _execute_flight_execution(
             if (
                 NAVPROXY_FC_MODE == "mavlink"
                 and intersection_hold_required
+                and intersection_hold_position is not None
                 and not intersection_guided_requested
                 and (
                     intersection_hold_completed_route_node_id
@@ -1105,6 +1118,26 @@ def _execute_flight_execution(
                 holding_coordinate = managed_intersection[
                     "holding_coordinate"
                 ]
+
+                holding_coordinate = (
+                    calculate_intersection_queue_coordinate(
+                        holding_coordinate=holding_coordinate,
+                        hold_position=intersection_hold_position,
+                        route_index=segment["route_index"],
+                        route_segments=context.compiler_ir["mission"][
+                            "route_conformance_segments"
+                        ],
+                    )
+                    if intersection_hold_position is not None
+                    else None
+                )
+
+                if holding_coordinate is None:
+                    raise RuntimeError(
+                        "No valid HOLD coordinate for assigned "
+                        f"queue position {intersection_hold_position} "
+                        f"on Route {segment['route_id']}."
+                    )
 
                 altitude_msl_m = (
                     segment["ground_elevation_ft"]

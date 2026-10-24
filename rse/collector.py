@@ -584,6 +584,20 @@ def process_telemetry(message: dict) -> list[dict] | None:
                     route_id=route["route_id"],
                     flight_execution_id=flight_execution_id,
                     route_node_id=managed_route_node_id,
+                    flight_band_id=intersection_occupancy[
+                        "flight_band_id"
+                    ],
+                    assigned_relative_altitude_ft=int(
+                        intersection_occupancy[
+                            "assigned_relative_altitude_ft"
+                        ]
+                    ),
+                )
+
+                hold_occupancy = select_route_occupancy_state(
+                    connection,
+                    route_id=route["route_id"],
+                    flight_execution_id=flight_execution_id,
                 )
 
                 if hold_state_id is None:
@@ -599,10 +613,11 @@ def process_telemetry(message: dict) -> list[dict] | None:
                     LOGGER.info(
                         "Managed intersection HOLD recorded: "
                         "flight_execution_id=%s route_id=%s "
-                        "route_node_id=%s",
+                        "route_node_id=%s hold_position=%s",
                         flight_execution_id,
                         route["route_id"],
                         managed_route_node_id,
+                        hold_occupancy["intersection_hold_position"],
                     )
 
         outgoing_occupancy = intersection_occupancy
@@ -885,6 +900,14 @@ def process_telemetry(message: dict) -> list[dict] | None:
                                     "flight_execution_id"
                                 ],
                                 route_node_id=incoming_route_node_id,
+                                flight_band_id=next_hold[
+                                    "flight_band_id"
+                                ],
+                                assigned_relative_altitude_ft=int(
+                                    next_hold[
+                                        "assigned_relative_altitude_ft"
+                                    ]
+                                ),
                             )
 
                             LOGGER.info(
