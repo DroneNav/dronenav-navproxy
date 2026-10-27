@@ -56,7 +56,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    logging.getLogger("app.navproxy.execution_service").setLevel(logging.DEBUG)
+    logging.getLogger("app.navproxy.execution_service").setLevel(logging.INFO)
     logging.getLogger("pika").setLevel(logging.WARNING)
 
     arguments = _parse_arguments()

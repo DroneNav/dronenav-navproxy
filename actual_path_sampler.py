@@ -1,11 +1,8 @@
 
 from dataclasses import dataclass
 
-import requests
-
-from app.config.constants import (
-    DEFAULT_API_BASE_URL,
-    DEFAULT_API_TIMEOUT_SECONDS,
+from app.services.route_service import (
+    evaluate_route_segment_conformance,
 )
 
 
@@ -84,14 +81,8 @@ class ActualPathSampler:
         if self._anchor is None or self._candidate is None:
             return 0.0
 
-        endpoint = (
-            f"{DEFAULT_API_BASE_URL.rstrip('/')}"
-            f"/api/routes/segment-conformance"
-        )
-
-        response = requests.post(
-            endpoint,
-            json={
+        result, error = evaluate_route_segment_conformance(
+            {
                 "latitude": self._candidate[1],
                 "longitude": self._candidate[0],
                 "start_latitude": self._anchor[1],
@@ -99,17 +90,13 @@ class ActualPathSampler:
                 "end_latitude": newest_coordinate[1],
                 "end_longitude": newest_coordinate[0],
                 "route_width_ft": 1,
-            },
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            timeout=DEFAULT_API_TIMEOUT_SECONDS,
+            }
         )
 
-        response.raise_for_status()
-
-        result = response.json()
+        if error:
+            raise RuntimeError(
+                f"Could not evaluate actual path deviation: {error}"
+            )
 
         return float(result["distance_ft"])
 

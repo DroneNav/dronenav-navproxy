@@ -13,6 +13,10 @@ from typing import Any
 import requests
 import time
 
+from app.services.route_service import (
+    evaluate_route_segment_conformance,
+)
+
 from .actual_path_sampler import ActualPathSampler
 from .actual_path_service import (
     complete_actual_path,
@@ -64,6 +68,7 @@ from app.navproxy.mavlink_telemetry import (
 )
 from .tooling.fer_compiler import (
     FlightExecutionCompileError,
+    load_aircraft,
     load_flight_execution,
     load_next_flight_execution,
     compile_flight_execution,
@@ -324,6 +329,19 @@ def _execute_flight_execution(
         flight_execution = load_flight_execution(
             flight_execution_id=flight_execution_id,
         )
+
+        aircraft = load_aircraft(
+            flight_execution["aircraft_id"],
+        )
+
+        planned_deceleration_ft_s2 = float(
+            aircraft["planned_deceleration_ft_s2"]
+        )
+
+        if planned_deceleration_ft_s2 <= 0:
+            raise FlightExecutionCompileError(
+                "Aircraft planned deceleration must be positive."
+            )
 
         (
             flight_band_id,
@@ -2092,42 +2110,22 @@ def evaluate_route_conformance(
     end_coordinate = segment["end_coordinate"]
     route_width_ft = segment["route_width_ft"]
 
-    endpoint = (
-        f"{DEFAULT_API_BASE_URL.rstrip('/')}"
-        f"/api/routes/segment-conformance"
+    result, error = evaluate_route_segment_conformance(
+        {
+            "latitude": telemetry.latitude,
+            "longitude": telemetry.longitude,
+            "start_latitude": start_coordinate[1],
+            "start_longitude": start_coordinate[0],
+            "end_latitude": end_coordinate[1],
+            "end_longitude": end_coordinate[0],
+            "route_width_ft": route_width_ft,
+        }
     )
 
-    try:
-        response = requests.post(
-            endpoint,
-            json={
-                "latitude": telemetry.latitude,
-                "longitude": telemetry.longitude,
-                "start_latitude": start_coordinate[1],
-                "start_longitude": start_coordinate[0],
-                "end_latitude": end_coordinate[1],
-                "end_longitude": end_coordinate[0],
-                "route_width_ft": route_width_ft,
-            },
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            timeout=DEFAULT_API_TIMEOUT_SECONDS,
+    if error:
+        raise RuntimeError(
+            f"Could not evaluate Route conformance: {error}"
         )
-
-        response.raise_for_status()
-        result = response.json()
-
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            f"Could not evaluate Route conformance: {exc}"
-        ) from exc
-
-    except requests.JSONDecodeError as exc:
-        raise RuntimeError(
-            "Route conformance API returned invalid JSON."
-        ) from exc
 
     return result
 
@@ -2147,42 +2145,22 @@ def evaluate_lane_conformance(
         - MIN_OPPOSING_LANE_CLEARANCE_FT
     )
 
-    endpoint = (
-        f"{DEFAULT_API_BASE_URL.rstrip('/')}"
-        f"/api/routes/segment-conformance"
+    result, error = evaluate_route_segment_conformance(
+        {
+            "latitude": telemetry.latitude,
+            "longitude": telemetry.longitude,
+            "start_latitude": start_coordinate[1],
+            "start_longitude": start_coordinate[0],
+            "end_latitude": end_coordinate[1],
+            "end_longitude": end_coordinate[0],
+            "route_width_ft": lane_conformance_width_ft,
+        }
     )
 
-    try:
-        response = requests.post(
-            endpoint,
-            json={
-                "latitude": telemetry.latitude,
-                "longitude": telemetry.longitude,
-                "start_latitude": start_coordinate[1],
-                "start_longitude": start_coordinate[0],
-                "end_latitude": end_coordinate[1],
-                "end_longitude": end_coordinate[0],
-                "route_width_ft": lane_conformance_width_ft,
-            },
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            timeout=DEFAULT_API_TIMEOUT_SECONDS,
+    if error:
+        raise RuntimeError(
+            f"Could not evaluate Route lane conformance: {error}"
         )
-
-        response.raise_for_status()
-        result = response.json()
-
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            f"Could not evaluate Route lane conformance: {exc}"
-        ) from exc
-
-    except requests.JSONDecodeError as exc:
-        raise RuntimeError(
-            "Route lane conformance API returned invalid JSON."
-        ) from exc
 
     return result
 

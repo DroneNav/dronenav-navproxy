@@ -84,6 +84,22 @@ def load_api_object(
     return value
 
 
+def load_aircraft(
+    aircraft_id: str,
+) -> dict[str, Any]:
+    """Retrieve one Aircraft record from the DroneNav API."""
+
+    if not isinstance(aircraft_id, str) or not aircraft_id:
+        raise FlightExecutionCompileError(
+            "aircraft_id must be a non-empty string."
+        )
+
+    return load_api_object(
+        endpoint=f"/api/aircraft/{aircraft_id}",
+        object_name="Aircraft",
+    )
+
+
 def load_flight_execution(
     flight_execution_id: str,
 ) -> dict[str, Any]:
@@ -858,23 +874,89 @@ def build_route_lane_coordinates(
     )
 
 
-def build_route_lane_waypoint_coordinates(
-    route_assertions: list[dict[str, Any]],
-    side: str,
-) -> list[list[float]]:
-    """Build operational lane waypoint coordinates for ordered Routes."""
+def build_continuous_route_lane_coordinates(
+  route_assertions: list[dict[str, Any]],
+  side: str,
+) -> list[list[list[float]]]:
+  """Build continuous lane coordinates across connected Routes."""
 
-    waypoint_coordinates: list[list[float]] = []
+  if not route_assertions:
+    return []
 
-    for route_assertion in route_assertions:
-        route_coordinates = build_route_lane_coordinates(
-            route_assertion,
-            side=side,
+  combined_coordinates = []
+  combined_widths = []
+  route_coordinate_counts = []
+
+  for route_index, route_assertion in enumerate(route_assertions):
+    parameters = route_assertion["parameters"]
+    coordinates = parameters["coordinates"]
+    segment_attributes = parameters["segment_attributes"]
+
+    if len(coordinates) < 2:
+      raise FlightExecutionCompileError(
+        "Each Route must contain at least two coordinates."
+      )
+
+    if len(segment_attributes) != len(coordinates) - 1:
+      raise FlightExecutionCompileError(
+        "Route segment attributes do not match Route geometry."
+      )
+
+    if route_index == 0:
+      combined_coordinates.extend(coordinates)
+    else:
+      if combined_coordinates[-1] != coordinates[0]:
+        raise FlightExecutionCompileError(
+          "Connected Routes have different endpoint coordinates."
         )
 
-        waypoint_coordinates.extend(route_coordinates)
+      combined_coordinates.extend(coordinates[1:])
 
-    return waypoint_coordinates
+    combined_widths.extend(
+      attributes["route_width_ft"]
+      for attributes in segment_attributes
+    )
+
+    route_coordinate_counts.append(len(coordinates))
+
+  continuous_lane = build_offset_polyline(
+    coordinates=combined_coordinates,
+    segment_widths_ft=combined_widths,
+    side=side,
+  )
+
+  route_lanes = []
+  start_index = 0
+
+  for coordinate_count in route_coordinate_counts:
+    route_lanes.append(
+      continuous_lane[
+        start_index:start_index + coordinate_count
+      ]
+    )
+
+    start_index += coordinate_count - 1
+
+  return route_lanes
+
+
+def build_route_lane_waypoint_coordinates(
+  route_assertions: list[dict[str, Any]],
+  side: str,
+) -> list[list[float]]:
+  """Build continuous operational lane waypoints for ordered Routes."""
+
+  route_lanes = build_continuous_route_lane_coordinates(
+    route_assertions=route_assertions,
+    side=side,
+  )
+
+  waypoint_coordinates = []
+
+  for lane_coordinates in route_lanes:
+    waypoint_coordinates.extend(lane_coordinates)
+
+  return waypoint_coordinates
 
 
 def build_route_waypoint_altitudes(
@@ -1032,51 +1114,6 @@ def build_verified_route_mission_ranges(
         )
 
     return route_ranges
-
-
-def insert_flat_segment_speed_changes(
-    mission_items: list[dict[str, Any]],
-    route_conformance_segments: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Insert speed changes whenever the governed segment speed changes."""
-
-    if not route_conformance_segments:
-        return mission_items
-
-    inserted_count = 0
-    active_speed_mph = None
-
-    for flat_segment_index, segment in enumerate(
-        route_conformance_segments
-    ):
-        speed_limit_mph = segment["speed_limit_mph"]
-
-        if speed_limit_mph == active_speed_mph:
-            continue
-
-        # Mission item 0 is TAKEOFF.
-        #
-        # Each flattened Route segment begins at waypoint
-        # flat_segment_index + 1. Insert the speed command
-        # immediately before that segment begins.
-        insert_index = (
-            flat_segment_index
-            + 1
-            + inserted_count
-        )
-
-        mission_items.insert(
-            insert_index,
-            build_change_speed_item(speed_limit_mph),
-        )
-
-        inserted_count += 1
-        active_speed_mph = speed_limit_mph
-
-    for sequence, item in enumerate(mission_items):
-        item["sequence"] = sequence
-
-    return mission_items
 
 
 def build_route_speed_limits(route_assertions: list[dict[str, Any]],
@@ -1502,15 +1539,17 @@ def build_route_conformance_segments(
 
     conformance_segments: list[dict[str, Any]] = []
 
+    route_lanes = build_continuous_route_lane_coordinates(
+      route_assertions=route_assertions,
+      side=side,
+    )
+
     for route_index, route_assertion in enumerate(route_assertions):
         parameters = route_assertion["parameters"]
         route_id = parameters["route_id"]
         coordinates = parameters["coordinates"]
         segment_attributes = parameters["segment_attributes"]
-        lane_coordinates = build_route_lane_coordinates(
-            route_assertion,
-            side=side,
-        )
+        lane_coordinates = route_lanes[route_index]
 
         for segment_index in range(len(coordinates) - 1):
             start_coordinate = coordinates[segment_index]
@@ -1784,71 +1823,6 @@ def build_transition_coordinate(
         (first_coordinate[0] + second_coordinate[0]) / 2,
         (first_coordinate[1] + second_coordinate[1]) / 2,
     ]
-
-
-def insert_route_segment_speed_changes(
-    mission_items: list[dict[str, Any]],
-    route_conformance_segments: list[dict[str, Any]],
-    route_waypoint_ranges: list[dict[str, int]],
-) -> list[dict[str, Any]]:
-    """Insert a speed command whenever the governed segment speed changes."""
-
-    if not route_conformance_segments:
-        return mission_items
-
-    route_start_waypoints = {
-        route_range["route_index"]: route_range["start_waypoint_index"]
-        for route_range in route_waypoint_ranges
-    }
-
-    speed_changes: list[tuple[int, int | float]] = []
-    active_speed_mph = None
-
-    for segment in route_conformance_segments:
-        speed_limit_mph = segment["speed_limit_mph"]
-
-        if speed_limit_mph == active_speed_mph:
-            continue
-
-        route_index = segment["route_index"]
-        route_segment_index = segment["route_segment_index"]
-
-        start_waypoint_index = route_start_waypoints[route_index]
-        segment_start_waypoint_index = (
-            start_waypoint_index + route_segment_index
-        )
-
-        speed_changes.append(
-            (
-                segment_start_waypoint_index,
-                speed_limit_mph,
-            )
-        )
-
-        active_speed_mph = speed_limit_mph
-
-    inserted_count = 0
-
-    for waypoint_index, speed_limit_mph in speed_changes:
-        # Mission item 0 is TAKEOFF, so waypoint N initially
-        # resides at mission index N + 1.
-        insert_index = (
-            waypoint_index
-            + 1
-            + inserted_count
-        )
-
-        mission_items.insert(
-            insert_index,
-            build_change_speed_item(speed_limit_mph),
-        )
-
-        inserted_count += 1
-
-    for sequence, item in enumerate(mission_items):
-        item["sequence"] = sequence
-
-    return mission_items
 
 
 def mph_to_meters_per_second(
