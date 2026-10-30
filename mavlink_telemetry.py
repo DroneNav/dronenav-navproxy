@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import math
 import select
 import socket
 
@@ -382,6 +383,12 @@ class MavlinkTelemetrySource:
                 continue
 
             yield TelemetryReading(
+                ground_speed_ft_s=(
+                    math.hypot(
+                        float(message.vx),
+                        float(message.vy),
+                    ) / 100.0 / 0.3048
+                ),
                 observed_at=datetime.now(timezone.utc),
                 latitude=int(message.lat) / 10_000_000,
                 longitude=int(message.lon) / 10_000_000,

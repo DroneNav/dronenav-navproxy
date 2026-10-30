@@ -12,6 +12,7 @@ from typing import Any
 
 import requests
 import time
+import math
 
 from app.services.route_service import (
     evaluate_route_segment_conformance,
@@ -648,6 +649,13 @@ def _execute_flight_execution(
     max_lane_offset_route_id: str | None = None
     max_lane_offset_route_segment_index: int | None = None
 
+    calibration_request = None
+    calibration_active = False
+    calibration_started_at: float | None = None
+    calibration_samples: list[tuple[float, float]] = []
+    calibration_stable_samples = 0
+    calibration_cruise_stable_samples = 0
+
     try:
         if NAVPROXY_FC_MODE == "mavlink":
             telemetry_iterable = mavlink_telemetry_source.iter_telemetry()
@@ -687,6 +695,52 @@ def _execute_flight_execution(
                             "Received a conflicting intersection grant "
                             "while a previous grant is pending."
                         )
+                elif message.get("message_type") == "calibration.request":
+                    if calibration_request is not None:
+                        raise RuntimeError(
+                            "A calibration request is already pending."
+                        )
+
+                    calibration_request = message["payload"]
+
+                    calibration_segment = find_requested_calibration_segment(
+                        context.compiler_ir,
+                        calibration_request,
+                    )
+
+                    if calibration_segment is None:
+                        raise ValueError(
+                            "Requested calibration segment is not "
+                            "part of this Flight Execution."
+                        )
+
+                    target_speed_ft_s = calibration_request.get(
+                        "target_speed_ft_s"
+                    )
+
+                    if (
+                        isinstance(target_speed_ft_s, bool)
+                        or not isinstance(target_speed_ft_s, (int, float))
+                        or not math.isfinite(target_speed_ft_s)
+                        or target_speed_ft_s <= 0
+                        or target_speed_ft_s >= commanded_cruise_speed_ft_s
+                    ):
+                        raise ValueError(
+                            "Calibration target speed must be positive "
+                            "and below the governed cruise speed."
+                        )
+
+                    LOGGER.info(
+                        "Calibration request received: "
+                        "route_id=%s segment=%s target_speed_ft_s=%s",
+                        calibration_request.get("route_id"),
+                        calibration_request.get("route_segment_index"),
+                        calibration_request.get("target_speed_ft_s"),
+                    )
+
+                    control_consumer.acknowledge(
+                        control_message["delivery_tag"]
+                    )
 
             if (
                 NAVPROXY_FC_MODE == "mavlink"
@@ -1426,6 +1480,10 @@ def _execute_flight_execution(
 
                     continue
 
+            calibration_route_conforming = False
+            calibration_lane_conforming = False
+            calibration_altitude_conforming = False
+
             if (
                 context.active_operational_element == "route"
                 and segment is not None
@@ -1433,6 +1491,10 @@ def _execute_flight_execution(
                 conformance = evaluate_route_conformance(
                     telemetry,
                     segment,
+                )
+
+                calibration_route_conforming = bool(
+                    conformance["inside"]
                 )
 
                 if not conformance["inside"]:
@@ -1482,6 +1544,9 @@ def _execute_flight_execution(
                     if next_lane_conformance["inside"]:
                         lane_conformance = next_lane_conformance
 
+                calibration_lane_conforming = bool(
+                    lane_conformance["inside"]
+                )
 
                 diagnostic_lane_conformance = lane_conformance
                 diagnostic_segment = segment
@@ -1602,6 +1667,10 @@ def _execute_flight_execution(
                     actual_agl_ft,
                 )
 
+                calibration_altitude_conforming = bool(
+                    vertical_conformance
+                )
+
                 if not vertical_conformance:
                     LOGGER.warning(
                         "Vertical conformance violation: "
@@ -1632,6 +1701,212 @@ def _execute_flight_execution(
                             "longitude": telemetry.longitude,
                         },
                     )
+
+            calibration_intersection_clear = (
+                is_calibration_intersection_clear(
+                    intersection_hold_required,
+                    intersection_guided_requested,
+                    intersection_auto_resume_requested,
+                    test_pause_guided_requested,
+                    test_pause_auto_resume_requested,
+                )
+            )
+
+            calibration_operationally_ready = (
+                is_calibration_operationally_ready(
+                    active_operational_element=(
+                        context.active_operational_element
+                    ),
+                    active_failsafe_action=context.active_failsafe_action,
+                    flight_mode=telemetry.flight_mode,
+                    route_conforming=calibration_route_conforming,
+                    lane_conforming=calibration_lane_conforming,
+                    altitude_conforming=calibration_altitude_conforming,
+                    intersection_clear=calibration_intersection_clear,
+                )
+            )
+
+            if (
+                calibration_request is not None
+                and not calibration_active
+                and is_requested_calibration_segment(
+                    segment,
+                    calibration_request,
+                )
+                and calibration_operationally_ready
+                and telemetry.ground_speed_ft_s is not None
+                and abs(
+                    telemetry.ground_speed_ft_s
+                    - commanded_cruise_speed_ft_s
+                ) <= 1.0
+            ):
+                calibration_cruise_stable_samples += 1
+            else:
+                calibration_cruise_stable_samples = 0
+
+            if (
+                calibration_request is not None
+                and not calibration_active
+                and is_requested_calibration_segment(
+                    segment,
+                    calibration_request,
+                )
+                and is_calibration_route_eligible(
+                    context.compiler_ir,
+                    segment,
+                )
+                and calibration_operationally_ready
+                and calibration_cruise_stable_samples >= 15
+            ):
+                calibration_active = True
+                calibration_started_at = time.monotonic()
+                calibration_samples = [(0.0, telemetry.ground_speed_ft_s)]
+                calibration_stable_samples = 0
+
+                if NAVPROXY_FC_MODE == "mavlink":
+                    request_ground_speed(
+                        connection,
+                        calibration_request["target_speed_ft_s"] * 0.3048,
+                    )
+
+                LOGGER.info(
+                    "Calibration activated: "
+                    "route_id=%s segment=%s target_speed_ft_s=%s",
+                    calibration_request["route_id"],
+                    calibration_request["route_segment_index"],
+                    calibration_request["target_speed_ft_s"],
+                )
+
+            if (
+                calibration_active
+                and (
+                    not is_requested_calibration_segment(
+                        segment,
+                        calibration_request,
+                    )
+                    or not calibration_operationally_ready
+                )
+            ):
+                LOGGER.warning(
+                    "Calibration interrupted: "
+                    "route segment changed or operational readiness lost."
+                )
+
+                calibration_active = False
+                calibration_request = None
+                calibration_started_at = None
+                calibration_samples = []
+                calibration_stable_samples = 0
+                calibration_cruise_stable_samples = 0
+
+                if (
+                    context.active_operational_element == "route"
+                    and context.active_failsafe_action is None
+                    and telemetry.flight_mode == "AUTO"
+                    and calibration_intersection_clear
+                    and NAVPROXY_FC_MODE == "mavlink"
+                    and cruise_speed_ft_s is not None
+                ):
+                    request_ground_speed(
+                        connection,
+                        cruise_speed_ft_s * 0.3048,
+                    )
+
+            if (
+                calibration_active
+                and calibration_started_at is not None
+            ):
+                calibration_elapsed_seconds = (
+                    time.monotonic() - calibration_started_at
+                )
+
+                if telemetry.ground_speed_ft_s is not None:
+                    calibration_samples.append(
+                        (
+                            calibration_elapsed_seconds,
+                            telemetry.ground_speed_ft_s,
+                        )
+                    )
+
+                    if abs(
+                        telemetry.ground_speed_ft_s
+                        - calibration_request["target_speed_ft_s"]
+                    ) <= 1.0:
+                        calibration_stable_samples += 1
+                    else:
+                        calibration_stable_samples = 0
+                else:
+                    calibration_stable_samples = 0
+
+                if (
+                    calibration_stable_samples >= 15
+                    or calibration_elapsed_seconds >= 10.0
+                ):
+                    LOGGER.info(
+                        "Calibration measurement ended: "
+                        "elapsed_seconds=%.2f "
+                        "stable_samples=%s "
+                        "sample_count=%s",
+                        calibration_elapsed_seconds,
+                        calibration_stable_samples,
+                        len(calibration_samples),
+                    )
+
+                    calibration_success = (
+                        calibration_stable_samples >= 15
+                    )
+
+                    if not calibration_success:
+                        LOGGER.warning(
+                            "Calibration timed out before target speed stabilized."
+                        )
+
+                    if calibration_success and len(calibration_samples) >= 2:
+                        initial_time, initial_speed = calibration_samples[0]
+                        final_time, final_speed = next(
+                            (
+                                sample_time,
+                                sample_speed,
+                            )
+                            for sample_time, sample_speed in calibration_samples
+                            if abs(
+                                sample_speed
+                                - calibration_request["target_speed_ft_s"]
+                            ) <= 1.0
+                        )
+
+                        elapsed_seconds = final_time - initial_time
+
+                        if (
+                            elapsed_seconds > 0
+                            and initial_speed > final_speed
+                        ):
+                            measured_deceleration_ft_s2 = (
+                                initial_speed - final_speed
+                            ) / elapsed_seconds
+
+                            LOGGER.info(
+                                "Calibration measured deceleration: "
+                                "%.3f ft/s^2",
+                                measured_deceleration_ft_s2,
+                            )
+
+                    if (
+                        NAVPROXY_FC_MODE == "mavlink"
+                        and calibration_operationally_ready
+                        and cruise_speed_ft_s is not None
+                    ):
+                        request_ground_speed(
+                            connection,
+                            cruise_speed_ft_s * 0.3048,
+                        )
+
+                    calibration_active = False
+                    calibration_request = None
+                    calibration_started_at = None
+                    calibration_samples = []
+                    calibration_stable_samples = 0
+                    calibration_cruise_stable_samples = 0
 
         if max_lane_offset_ft is not None:
             LOGGER.info(
@@ -1900,6 +2175,102 @@ def get_route_conformance_segment(
         "flat_segment_index": segment_index,
         **conformance_segments[segment_index],
     }
+
+
+def is_requested_calibration_segment(
+    segment: dict[str, Any] | None,
+    calibration_request: dict[str, Any] | None,
+) -> bool:
+    """Check whether the active segment matches a calibration request."""
+
+    if segment is None or calibration_request is None:
+        return False
+
+    return (
+        str(segment["route_id"])
+        == str(calibration_request["route_id"])
+        and segment["route_segment_index"]
+        == calibration_request["route_segment_index"]
+    )
+
+
+def find_requested_calibration_segment(
+    compiler_ir: dict[str, Any],
+    calibration_request: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Find the requested calibration segment in the compiled flight."""
+
+    segments = compiler_ir["mission"]["route_conformance_segments"]
+
+    for index, segment in enumerate(segments):
+        candidate = {
+            "flat_segment_index": index,
+            **segment,
+        }
+
+        if is_requested_calibration_segment(
+            candidate,
+            calibration_request,
+        ):
+            return candidate
+
+    return None
+
+
+def is_calibration_intersection_clear(
+    intersection_hold_required: bool,
+    intersection_guided_requested: bool,
+    intersection_auto_resume_requested: bool,
+    test_pause_guided_requested: bool,
+    test_pause_auto_resume_requested: bool,
+) -> bool:
+    """Return whether intersection control is inactive."""
+
+    return not any((
+        intersection_hold_required,
+        intersection_guided_requested,
+        intersection_auto_resume_requested,
+        test_pause_guided_requested,
+        test_pause_auto_resume_requested,
+    ))
+
+
+def is_calibration_route_eligible(
+    compiler_ir: dict[str, Any],
+    segment: dict[str, Any],
+) -> bool:
+    """Exclude Route segments ending at managed intersections."""
+
+    if is_last_segment_of_route(compiler_ir, segment):
+        if get_managed_intersection_for_segment(
+            compiler_ir,
+            segment,
+        ) is not None:
+            return False
+
+    return True
+
+
+def is_calibration_operationally_ready(
+    active_operational_element: str,
+    active_failsafe_action: str | None,
+    flight_mode: str,
+    route_conforming: bool,
+    lane_conforming: bool,
+    altitude_conforming: bool,
+    intersection_clear: bool,
+) -> bool:
+    """Require normal, conforming flight before calibration."""
+
+    return (
+        active_operational_element == "route"
+        and active_failsafe_action is None
+        and flight_mode == "AUTO"
+        and route_conforming
+        and lane_conforming
+        and altitude_conforming
+        and intersection_clear
+    )
 
 
 def get_route_segment_index_for_mission_sequence(
