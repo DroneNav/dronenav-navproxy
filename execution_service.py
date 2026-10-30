@@ -37,7 +37,6 @@ from app.config.constants import (
 
 from . import constants
 from .queue_navigation import (
-    calculate_coordinate_distance_ft,
     get_managed_intersection_for_segment,
     get_flight_intersection_state,
     should_hold_for_intersection,
@@ -105,6 +104,15 @@ from app.navproxy.tooling.start_scheduled_flight import (
 from app.navproxy.tooling.upload_mission import (
     DEFAULT_CONNECTION,
     connect_vehicle,
+)
+from app.navproxy.tooling.calibrate_deceleration import (
+    get_converged_deceleration,
+    get_remaining_calibration_distance_ft,
+    has_calibration_distance,
+)
+from app.services.aircraft_calibration_profile_service import (
+    get_calibration_profiles,
+    patch_calibration_profile,
 )
 from app.models.flight_execution_model import (
     complete_scheduled_flight_execution,
@@ -651,10 +659,13 @@ def _execute_flight_execution(
 
     calibration_request = None
     calibration_active = False
+    calibration_segment_entered = False
     calibration_started_at: float | None = None
     calibration_samples: list[tuple[float, float]] = []
     calibration_stable_samples = 0
     calibration_cruise_stable_samples = 0
+    calibration_measurements: list[float] = []
+    calibration_attempt_count = 0
 
     try:
         if NAVPROXY_FC_MODE == "mavlink":
@@ -701,11 +712,13 @@ def _execute_flight_execution(
                             "A calibration request is already pending."
                         )
 
-                    calibration_request = message["payload"]
+                    pending_calibration_request = message["payload"]
+
+                    calibration_segment_entered = False
 
                     calibration_segment = find_requested_calibration_segment(
                         context.compiler_ir,
-                        calibration_request,
+                        pending_calibration_request,
                     )
 
                     if calibration_segment is None:
@@ -714,7 +727,7 @@ def _execute_flight_execution(
                             "part of this Flight Execution."
                         )
 
-                    target_speed_ft_s = calibration_request.get(
+                    target_speed_ft_s = pending_calibration_request.get(
                         "target_speed_ft_s"
                     )
 
@@ -729,6 +742,32 @@ def _execute_flight_execution(
                             "Calibration target speed must be positive "
                             "and below the governed cruise speed."
                         )
+
+                    calibration_profiles, calibration_error = get_calibration_profiles(
+                        flight_execution["aircraft_id"],
+                        commanded_cruise_speed_ft_s,
+                    )
+
+                    if calibration_error:
+                        raise ValueError(calibration_error)
+
+                    calibration_profile = (
+                        calibration_profiles[0]
+                        if calibration_profiles
+                        else None
+                    )
+
+                    if calibration_profile is None:
+                        raise ValueError(
+                            "No calibration profile exists for this "
+                            "Aircraft at the governed cruise speed."
+                        )
+
+                    pending_calibration_request["profile_id"] = (
+                        calibration_profile["profile_id"]
+                    )
+
+                    calibration_request = pending_calibration_request
 
                     LOGGER.info(
                         "Calibration request received: "
@@ -780,11 +819,6 @@ def _execute_flight_execution(
                 segment is not None
                 and telemetry.battery_percent is not None
             ):
-                current_coordinate = [
-                    telemetry.longitude,
-                    telemetry.latitude,
-                ]
-
                 seconds_to_destination = (
                     route_timing_model.get_seconds_to_destination(
                         context.active_route_segment_index,
@@ -1728,12 +1762,26 @@ def _execute_flight_execution(
 
             if (
                 calibration_request is not None
+                and is_requested_calibration_segment(
+                    segment,
+                    calibration_request,
+                )
+            ):
+                calibration_segment_entered = True
+
+            if (
+                calibration_request is not None
                 and not calibration_active
                 and is_requested_calibration_segment(
                     segment,
                     calibration_request,
                 )
                 and calibration_operationally_ready
+                and has_calibration_distance(
+                    segment,
+                    [telemetry.longitude, telemetry.latitude],
+                    commanded_cruise_speed_ft_s,
+                )
                 and telemetry.ground_speed_ft_s is not None
                 and abs(
                     telemetry.ground_speed_ft_s
@@ -1756,9 +1804,16 @@ def _execute_flight_execution(
                     segment,
                 )
                 and calibration_operationally_ready
+                and has_calibration_distance(
+                    segment,
+                    [telemetry.longitude, telemetry.latitude],
+                    commanded_cruise_speed_ft_s,
+                )
                 and calibration_cruise_stable_samples >= 15
+                and calibration_attempt_count < 10
             ):
                 calibration_active = True
+                calibration_attempt_count += 1
                 calibration_started_at = time.monotonic()
                 calibration_samples = [(0.0, telemetry.ground_speed_ft_s)]
                 calibration_stable_samples = 0
@@ -1778,13 +1833,33 @@ def _execute_flight_execution(
                 )
 
             if (
-                calibration_active
+                calibration_request is not None
                 and (
-                    not is_requested_calibration_segment(
-                        segment,
-                        calibration_request,
+                    (
+                        calibration_segment_entered
+                        and not is_requested_calibration_segment(
+                            segment,
+                            calibration_request,
+                        )
                     )
-                    or not calibration_operationally_ready
+                    or (
+                        calibration_segment_entered
+                        and not calibration_operationally_ready
+                    )
+                    or (
+                        calibration_active
+                        and get_remaining_calibration_distance_ft(
+                            segment,
+                            [telemetry.longitude, telemetry.latitude],
+                        ) <= 100.0
+                    )
+                    or (
+                        calibration_active
+                        and get_remaining_calibration_distance_ft(
+                            segment,
+                            [telemetry.longitude, telemetry.latitude],
+                        ) <= 100.0
+                    )
                 )
             ):
                 LOGGER.warning(
@@ -1792,7 +1867,21 @@ def _execute_flight_execution(
                     "route segment changed or operational readiness lost."
                 )
 
+                result, error = patch_calibration_profile(
+                    aircraft_id=flight_execution["aircraft_id"],
+                    profile_id=calibration_request["profile_id"],
+                    data={"calibration_success": False},
+                    calibration_result=True,
+                )
+
+                if error:
+                    LOGGER.error(
+                        "Failed to report interrupted calibration: %s",
+                        error,
+                    )
+
                 calibration_active = False
+                calibration_segment_entered = False
                 calibration_request = None
                 calibration_started_at = None
                 calibration_samples = []
@@ -1885,6 +1974,14 @@ def _execute_flight_execution(
                                 initial_speed - final_speed
                             ) / elapsed_seconds
 
+                            if (
+                                math.isfinite(measured_deceleration_ft_s2)
+                                and measured_deceleration_ft_s2 > 0
+                            ):
+                                calibration_measurements.append(
+                                    measured_deceleration_ft_s2
+                                )
+
                             LOGGER.info(
                                 "Calibration measured deceleration: "
                                 "%.3f ft/s^2",
@@ -1901,8 +1998,78 @@ def _execute_flight_execution(
                             cruise_speed_ft_s * 0.3048,
                         )
 
+                    converged_deceleration = (
+                        get_converged_deceleration(
+                            calibration_measurements
+                        )
+                    )
+
+                    if converged_deceleration is not None:
+                        LOGGER.info(
+                            "Calibration converged: "
+                            "deceleration=%.3f ft/s^2 "
+                            "valid_measurements=%s attempts=%s",
+                            converged_deceleration,
+                            len(calibration_measurements),
+                            calibration_attempt_count,
+                        )
+
+                        result, error = patch_calibration_profile(
+                            aircraft_id=flight_execution["aircraft_id"],
+                            profile_id=calibration_request["profile_id"],
+                            data={
+                                "calibration_success": True,
+                                "planned_deceleration_ft_s2": converged_deceleration,
+                                "calibration_flight_execution_id": str(
+                                    flight_execution["flight_execution_id"]
+                                ),
+                                "sample_count": len(calibration_measurements),
+                            },
+                            calibration_result=True,
+                        )
+
+                        if error:
+                            LOGGER.error(
+                                "Failed to save converged calibration "
+                                "result: %s",
+                                error,
+                            )
+                        else:
+                            LOGGER.info(
+                                "Aircraft calibration profile updated: "
+                                "profile_id=%s deceleration=%.3f ft/s^2",
+                                calibration_request["profile_id"],
+                                converged_deceleration,
+                            )
+
+                        calibration_segment_entered = False
+                        calibration_request = None
+
+                    elif calibration_attempt_count >= 10:
+                        LOGGER.warning(
+                            "Calibration failed to converge after "
+                            "%s attempts (%s valid measurements).",
+                            calibration_attempt_count,
+                            len(calibration_measurements),
+                        )
+
+                        result, error = patch_calibration_profile(
+                            aircraft_id=flight_execution["aircraft_id"],
+                            profile_id=calibration_request["profile_id"],
+                            data={"calibration_success": False},
+                            calibration_result=True,
+                        )
+
+                        if error:
+                            LOGGER.error(
+                                "Failed to report nonconvergent calibration: %s",
+                                error,
+                            )
+
+                        calibration_segment_entered = False
+                        calibration_request = None
+
                     calibration_active = False
-                    calibration_request = None
                     calibration_started_at = None
                     calibration_samples = []
                     calibration_stable_samples = 0
@@ -3220,17 +3387,6 @@ def assert_flight_band(
 
     current_datetime = datetime.now(
         timezone_info
-    )
-
-    # Flight Band days use Sunday=0 through Saturday=6.
-    current_day = (
-        current_datetime.weekday() + 1
-    ) % 7
-
-    current_time = current_datetime.time().replace(
-        second=0,
-        microsecond=0,
-        tzinfo=None,
     )
 
     flight_bands = load_flight_bands(

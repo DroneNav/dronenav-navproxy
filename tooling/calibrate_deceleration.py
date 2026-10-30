@@ -25,6 +25,10 @@ from app.navproxy.tooling.mavlink_connection import (
     connect_to_ardupilot,
 )
 
+from app.navproxy.queue_navigation import (
+    calculate_coordinate_distance_ft,
+)
+
 from app.navproxy.mavlink_telemetry import (
     request_ground_speed,
     request_message_interval,
@@ -36,6 +40,8 @@ from app.navproxy.telemetry_publisher import (
     RABBITMQ_VHOST,
     get_rabbitmq_credentials,
 )
+
+
 
 
 def calculate_ground_speed_ft_s(message) -> float:
@@ -326,6 +332,7 @@ def wait_for_calibration_segment(
 
 def verify_calibration_position(
     connection: mavutil.mavfile,
+    segment: dict,
 ) -> bool:
     """Verify sufficient straight-line distance remains."""
 
@@ -580,6 +587,117 @@ def confirm_deceleration() -> bool:
     return response.strip() == "YES"
 
 
+def get_remaining_calibration_distance_ft(
+    segment: dict,
+    aircraft_coordinate: list[float],
+) -> float:
+    """Calculate remaining distance along the operational Route segment."""
+
+    start = segment["operational_start_coordinate"]
+    end = segment["operational_end_coordinate"]
+
+    segment_length_ft = calculate_coordinate_distance_ft(
+        start,
+        end,
+    )
+
+    if segment_length_ft <= 0:
+        return 0.0
+
+    # Approximate local east/north displacement in feet.
+    latitude_radians = math.radians(
+        (start[1] + end[1]) / 2.0
+    )
+    feet_per_degree = 364000.0
+
+    segment_east = (
+        (end[0] - start[0])
+        * feet_per_degree
+        * math.cos(latitude_radians)
+    )
+    segment_north = (
+        (end[1] - start[1])
+        * feet_per_degree
+    )
+
+    aircraft_east = (
+        (aircraft_coordinate[0] - start[0])
+        * feet_per_degree
+        * math.cos(latitude_radians)
+    )
+    aircraft_north = (
+        (aircraft_coordinate[1] - start[1])
+        * feet_per_degree
+    )
+
+    segment_length_squared = (
+        segment_east ** 2 + segment_north ** 2
+    )
+
+    if segment_length_squared <= 0:
+        return 0.0
+
+    progress = (
+        aircraft_east * segment_east
+        + aircraft_north * segment_north
+    ) / segment_length_squared
+
+    progress = max(0.0, min(1.0, progress))
+
+    return segment_length_ft * (1.0 - progress)
+
+
+def has_calibration_distance(
+    segment: dict,
+    aircraft_coordinate: list[float],
+    cruise_speed_ft_s: float,
+) -> bool:
+    """Check whether sufficient Route distance remains for calibration."""
+
+    if (
+        not math.isfinite(cruise_speed_ft_s)
+        or cruise_speed_ft_s <= 0
+    ):
+        return False
+
+    remaining_distance_ft = get_remaining_calibration_distance_ft(
+        segment,
+        aircraft_coordinate,
+    )
+
+    required_distance_ft = (
+        cruise_speed_ft_s * 30.0
+        + 100.0
+    )
+
+    return remaining_distance_ft >= required_distance_ft
+
+
+def get_converged_deceleration(
+    measurements: list[float],
+) -> float | None:
+    """Return conservative deceleration when five measurements converge."""
+
+    if len(measurements) < 5:
+        return None
+
+    recent_measurements = measurements[-5:]
+    average = sum(recent_measurements) / len(recent_measurements)
+
+    if not math.isfinite(average) or average <= 0:
+        return None
+
+    if any(
+        not math.isfinite(value)
+        or value <= 0
+        or abs(value - average) > average * 0.10
+        for value in recent_measurements
+    ):
+        return None
+
+    return min(recent_measurements)
+
+
 if __name__ == "__main__":
     args = parse_arguments()
 
@@ -722,5 +840,6 @@ if __name__ == "__main__":
 
     finally:
         connection.close()
+
 
 
