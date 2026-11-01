@@ -68,7 +68,6 @@ from app.navproxy.mavlink_telemetry import (
 )
 from .tooling.fer_compiler import (
     FlightExecutionCompileError,
-    load_aircraft,
     load_flight_execution,
     load_next_flight_execution,
     compile_flight_execution,
@@ -90,6 +89,9 @@ from app.navproxy.failsafe import (
 )
 from app.navproxy.fc_adapters.ardupilot_failsafe_recovery import (
     program_failsafe_recovery_map,
+)
+from app.navproxy.fc_adapters.ardupilot import (
+    expected_frame_class,
 )
 from app.navproxy.scheduled_mission_validator import (
     normalize_ardupilot_mission_sequence,
@@ -339,19 +341,6 @@ def _execute_flight_execution(
             flight_execution_id=flight_execution_id,
         )
 
-        aircraft = load_aircraft(
-            flight_execution["aircraft_id"],
-        )
-
-        planned_deceleration_ft_s2 = float(
-            aircraft["planned_deceleration_ft_s2"]
-        )
-
-        if planned_deceleration_ft_s2 <= 0:
-            raise FlightExecutionCompileError(
-                "Aircraft planned deceleration must be positive."
-            )
-
         (
             flight_band_id,
             minimum_agl_ft,
@@ -526,12 +515,11 @@ def _execute_flight_execution(
         ),
     )
 
-    record_preflight_result(
-        context,
-        preflight_result,
-    )
-
     if preflight_result.status != constants.PreflightStatus.PASSED:
+        record_preflight_result(
+            context,
+            preflight_result,
+        )
 
         release_flight_execution(
             context.flight_execution_id,
@@ -549,7 +537,13 @@ def _execute_flight_execution(
         )
 
     if NAVPROXY_FC_MODE == "simulator":
+        record_preflight_result(
+            context,
+            preflight_result,
+        )
+
         simulator.wait_for_preflight_delay()
+
 
     connection = None
 
@@ -560,6 +554,62 @@ def _execute_flight_execution(
             connection_string,
             10.0,
         )
+
+        try:
+            expected_class = expected_frame_class(
+                context.flight_execution["aircraft_type"]
+            )
+
+            actual_class = int(
+                read_parameter(connection, "FRAME_CLASS")
+            )
+
+            aircraft_type_assertion = AssertionResult(
+                command=constants.NAV_ASSERT_AIRCRAFT_TYPE,
+                passed=(actual_class == expected_class),
+                message=(
+                    f"Aircraft configuration: expected FRAME_CLASS "
+                    f"{expected_class}, received {actual_class}."
+                ),
+            )
+
+        except (KeyError, ValueError, RuntimeError) as error:
+            aircraft_type_assertion = AssertionResult(
+                command=constants.NAV_ASSERT_AIRCRAFT_TYPE,
+                passed=False,
+                message=(
+                    f"Aircraft configuration verification failed: {error}"
+                ),
+            )
+
+        preflight_result = PreflightResult(
+            flight_execution_uuid=preflight_result.flight_execution_uuid,
+            status=(
+                constants.PreflightStatus.PASSED
+                if aircraft_type_assertion.passed
+                else constants.PreflightStatus.FAILED
+            ),
+            assertion_results=(
+                *preflight_result.assertion_results,
+                aircraft_type_assertion,
+            ),
+        )
+
+        record_preflight_result(
+            context,
+            preflight_result,
+        )
+
+        if preflight_result.status != constants.PreflightStatus.PASSED:
+            connection.close()
+
+            release_flight_execution(
+                context.flight_execution_id,
+            )
+
+            return FlightExecutionResult(
+                completed=False,
+            )
 
         cruise_speed_ft_s = (
             read_parameter(connection, "WP_SPD") * 3.28084
@@ -666,6 +716,49 @@ def _execute_flight_execution(
     calibration_cruise_stable_samples = 0
     calibration_measurements: list[float] = []
     calibration_attempt_count = 0
+
+
+    if context.flight_execution["flight_calibration"]:
+        calibration_segment = get_route_conformance_segment(
+            context.compiler_ir,
+            1,
+        )
+
+        if calibration_segment is None:
+            raise FlightExecutionCompileError(
+                "Calibration flight requires three Route segments."
+            )
+
+        calibration_profiles, calibration_error = get_calibration_profiles(
+            context.flight_execution["aircraft_id"],
+            commanded_cruise_speed_ft_s,
+        )
+
+        if calibration_error:
+            raise FlightExecutionCompileError(calibration_error)
+
+        if not calibration_profiles:
+            raise FlightExecutionCompileError(
+                "Aircraft calibration profile not found."
+            )
+
+        calibration_request = {
+            "route_id": calibration_segment["route_id"],
+            "route_segment_index": calibration_segment["route_segment_index"],
+            "target_speed_ft_s": commanded_cruise_speed_ft_s * 0.5,
+            "profile_id": calibration_profiles[0]["profile_id"],
+        }
+
+        LOGGER.info(
+            "FER calibration initialized: "
+            "route_id=%s segment=%s cruise_speed_ft_s=%.2f target_speed_ft_s=%.2f profile_id=%s",
+            calibration_request["route_id"],
+            calibration_request["route_segment_index"],
+            commanded_cruise_speed_ft_s,
+            calibration_request["target_speed_ft_s"],
+            calibration_request["profile_id"],
+        )
+
 
     try:
         if NAVPROXY_FC_MODE == "mavlink":
@@ -1799,6 +1892,30 @@ def _execute_flight_execution(
                     segment,
                     calibration_request,
                 )
+            ):
+                LOGGER.debug(
+                    "Calibration readiness: "
+                    "ground_speed=%s commanded_speed=%s "
+                    "stable_samples=%s operationally_ready=%s "
+                    "distance_ok=%s",
+                    telemetry.ground_speed_ft_s,
+                    commanded_cruise_speed_ft_s,
+                    calibration_cruise_stable_samples,
+                    calibration_operationally_ready,
+                    has_calibration_distance(
+                        segment,
+                        [telemetry.longitude, telemetry.latitude],
+                        commanded_cruise_speed_ft_s,
+                    ),
+                )
+
+            if (
+                calibration_request is not None
+                and not calibration_active
+                and is_requested_calibration_segment(
+                    segment,
+                    calibration_request,
+                )
                 and is_calibration_route_eligible(
                     context.compiler_ir,
                     segment,
@@ -1870,7 +1987,10 @@ def _execute_flight_execution(
                 result, error = patch_calibration_profile(
                     aircraft_id=flight_execution["aircraft_id"],
                     profile_id=calibration_request["profile_id"],
-                    data={"calibration_success": False},
+                    data={
+                        "calibration_success": False,
+                        "updated_by": "dronenav",
+                    },
                     calibration_result=True,
                 )
 
@@ -2024,6 +2144,7 @@ def _execute_flight_execution(
                                     flight_execution["flight_execution_id"]
                                 ),
                                 "sample_count": len(calibration_measurements),
+                                "updated_by": "dronenav",
                             },
                             calibration_result=True,
                         )
@@ -2056,7 +2177,10 @@ def _execute_flight_execution(
                         result, error = patch_calibration_profile(
                             aircraft_id=flight_execution["aircraft_id"],
                             profile_id=calibration_request["profile_id"],
-                            data={"calibration_success": False},
+                            data={
+                                "calibration_success": False,
+                                "updated_by": "dronenav",
+                            },
                             calibration_result=True,
                         )
 

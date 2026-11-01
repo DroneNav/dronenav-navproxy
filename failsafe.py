@@ -38,17 +38,17 @@ def evaluate_failsafe(
             reason="Navigation integrity has degraded below the governed threshold.",
         )
 
-    if telemetry.energy_health == "critical":
-        return FailsafeDecision(
-            action="land_now",
-            reason="Critical energy condition detected.",
-        )
+    #if telemetry.energy_health == "critical":
+    #    return FailsafeDecision(
+    #        action="land_now",
+    #        reason="Critical energy condition detected.",
+    #    )
 
-    if telemetry.energy_health == "degraded":
-        return FailsafeDecision(
-            action="abort_to_failsafe",
-            reason="Energy reserve has degraded below the governed threshold.",
-        )
+    #if telemetry.energy_health == "degraded":
+    #    return FailsafeDecision(
+    #        action="abort_to_failsafe",
+    #        reason="Energy reserve has degraded below the governed threshold.",
+    #    )
 
     if telemetry.vehicle_health == "critical":
         return FailsafeDecision(

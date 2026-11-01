@@ -215,3 +215,23 @@ def decode_failsafe_recovery_map(
 
     return jump_map
 
+
+def expected_frame_class(
+    aircraft_type: str,
+) -> int:
+    """Translate a DroneNav aircraft type to ArduPilot FRAME_CLASS."""
+
+    frame_classes = {
+        "quadrotor": 1,
+        "hexrotor": 2,
+        "octarotor": 3,
+    }
+
+    if aircraft_type not in frame_classes:
+        raise ValueError(
+            f"Unsupported DroneNav aircraft type: {aircraft_type}"
+        )
+
+    return frame_classes[aircraft_type]
+
+
