@@ -95,8 +95,10 @@ source ~/venv-ardupilot/bin/activate
 Start the simulator.
 
 ```bash
-1. sim_vehicle.py -v ArduCopter --console --map -I 0 -l 34.077756274,-84.301123283,334.61,0
-2. sim_vehicle.py -v ArduCopter --console --map -I 0 -l 34.077574102,-84.300110728,334.61,0
+1. sim_vehicle.py -v ArduCopter --console --map -I 0 -f quad -l 34.077756274,-84.301123283,334.61,0 (Inovation Academy)
+2. sim_vehicle.py -v ArduCopter --console --map -I 0 -f quad -l 34.077574102,-84.300110728,334.61,0 (Wilshire Glen Intersection)
+3. sim_vehicle.py -v ArduCopter --console --map -I 0 -f quad -l 32.448330963,-83.75876663,334.61,0 (Calibration Route)
+
 ```
 
 Wait until SITL has completely initialized before proceeding.
