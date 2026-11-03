@@ -11,21 +11,9 @@ from app.navproxy.tooling.fer_compiler import (
     get_coordinate_distance_ft,
 )
 
-FEET_PER_MILE = 5280.0
-SECONDS_PER_HOUR = 3600.0
-
 ARRIVAL_TRANSITION_SECONDS = 10.0
 LANDING_SECONDS = 15.0
 
-
-def mph_to_feet_per_second(
-    speed_mph: int | float,
-) -> float:
-    return (
-        float(speed_mph)
-        * FEET_PER_MILE
-        / SECONDS_PER_HOUR
-    )
 
 
 @dataclass(frozen=True)
@@ -38,17 +26,24 @@ class RouteTimingModel:
     def __init__(
         self,
         compiler_ir: dict[str, Any],
+        commanded_cruise_speed_ft_s: float,
     ) -> None:
+        if commanded_cruise_speed_ft_s <= 0:
+            raise ValueError(
+                "Commanded cruise speed must be positive."
+            )
+
         self._segment_timings = (
             self._build_segment_timings(
-                compiler_ir
+                compiler_ir,
+                commanded_cruise_speed_ft_s,
             )
         )
-
 
     def _build_segment_timings(
         self,
         compiler_ir: dict[str, Any],
+        commanded_cruise_speed_ft_s: float,
     ) -> dict[int, SegmentTiming]:
 
         segments = compiler_ir["mission"][
@@ -65,11 +60,7 @@ class RouteTimingModel:
                 segment["end_coordinate"],
             )
 
-            speed_ft_per_second = (
-                mph_to_feet_per_second(
-                    segment["speed_limit_mph"]
-                )
-            )
+            speed_ft_per_second = commanded_cruise_speed_ft_s
 
             segment_durations.append(
                 distance_ft / speed_ft_per_second
@@ -105,11 +96,7 @@ class RouteTimingModel:
                 )
             )
 
-            failsafe_speed_ft_per_second = (
-                mph_to_feet_per_second(
-                    segment["speed_limit_mph"]
-                )
-            )
+            failsafe_speed_ft_per_second = commanded_cruise_speed_ft_s
 
             timings[index] = SegmentTiming(
                 seconds_to_destination=(

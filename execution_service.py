@@ -680,6 +680,7 @@ def _execute_flight_execution(
 
     route_timing_model = RouteTimingModel(
         context.compiler_ir,
+        commanded_cruise_speed_ft_s,
     )
 
     last_telemetry: TelemetryReading | None = None

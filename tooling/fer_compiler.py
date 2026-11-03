@@ -32,6 +32,7 @@ from app.config.constants import (
     DEFAULT_API_TIMEOUT_SECONDS,
     TRANSITION_DIAMETER_FT,
     ROUTE_INTERSECTION_HOLDING_SETBACK_FT,
+    VERTICAL_CONFORMANCE_MARGIN_FT,
 )
 
 from app.services.elevation_service import (
@@ -506,8 +507,6 @@ def build_arrival_position_assertion(
                 "Arrival DronePort geometry must be Point."
             )
 
-        arrival_coordinate = geometry["coordinates"]
-
         if landing_assignment is not None:
             assigned_droneport_id = landing_assignment.get(
                 "arrival_droneport_id"
@@ -530,8 +529,6 @@ def build_arrival_position_assertion(
             raise FlightExecutionCompileError(
                 "Landing-space assignment is missing a valid coordinate."
             )
-
-        arrival_coordinate = assigned_coordinate
 
         diameter_ft = arrival_droneport.get(
             "droneport_diameter_ft"
@@ -1116,30 +1113,6 @@ def build_verified_route_mission_ranges(
     return route_ranges
 
 
-def build_route_speed_limits(route_assertions: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Return the entry and exit speed limits for each ordered Route."""
-
-    route_speed_limits: list[dict[str, Any]] = []
-
-    for route_index, route_assertion in enumerate(route_assertions):
-        segment_attributes = (
-            route_assertion["parameters"]["segment_attributes"]
-        )
-
-        route_speed_limits.append({
-            "route_index": route_index,
-            "entry_speed_limit_mph": (
-                segment_attributes[0]["speed_limit_mph"]
-            ),
-            "exit_speed_limit_mph": (
-                segment_attributes[-1]["speed_limit_mph"]
-            ),
-        })
-
-    return route_speed_limits
-
-
 def resolve_mission_altitude_band(
     flight_execution: dict[str, Any],
 ) -> tuple[str, int | float, int | float, int | float]:
@@ -1227,7 +1200,6 @@ def build_mission_items(
     waypoint_altitudes: list[float],
     route_conformance_segments: list[dict[str, Any]],
     route_waypoint_ranges: list[dict[str, int]],
-    route_speed_limits: list[dict[str, Any]],
     minimum_agl_ft: int | float,
     assigned_relative_altitude_ft: int | float,
     arrival_coordinate: list[float],
@@ -1503,12 +1475,6 @@ def build_route_transitions(
         current_parameters = route_assertions[route_index]["parameters"]
         next_parameters = route_assertions[route_index + 1]["parameters"]
 
-        current_segment_attributes = current_parameters["segment_attributes"]
-        next_segment_attributes = next_parameters["segment_attributes"]
-
-        from_speed_limit_mph = current_segment_attributes[-1]["speed_limit_mph"]
-        to_speed_limit_mph = next_segment_attributes[0]["speed_limit_mph"]
-
         current_end = current_parameters["coordinates"][-1]
         next_start = next_parameters["coordinates"][0]
 
@@ -1520,12 +1486,6 @@ def build_route_transitions(
                 next_start,
             ),
             "diameter_ft": TRANSITION_DIAMETER_FT,
-            "from_speed_limit_mph": from_speed_limit_mph,
-            "to_speed_limit_mph": to_speed_limit_mph,
-            "transition_speed_mph": min(
-                from_speed_limit_mph,
-                to_speed_limit_mph,
-            ),
         })
 
     return transitions
@@ -1565,7 +1525,6 @@ def build_route_conformance_segments(
                 "operational_start_coordinate": lane_coordinates[segment_index],
                 "operational_end_coordinate": lane_coordinates[segment_index + 1],
                 "route_width_ft": attributes["route_width_ft"],
-                "speed_limit_mph": attributes["speed_limit_mph"],
                 "ground_elevation_ft": attributes["ground_elevation_ft"],
                 "failsafe_coordinate": attributes.get("failsafe_coordinate"),
             })
@@ -1683,10 +1642,6 @@ def interpret_flight_execution(
         route_assertions
     )
 
-    route_speed_limits = build_route_speed_limits(
-        route_assertions
-    )
-
     route_conformance_segments = build_route_conformance_segments(
         route_assertions,
         side="right",
@@ -1725,7 +1680,6 @@ def interpret_flight_execution(
         waypoint_altitudes=waypoint_altitudes,
         route_conformance_segments=route_conformance_segments,
         route_waypoint_ranges=route_waypoint_ranges,
-        route_speed_limits=route_speed_limits,
         minimum_agl_ft=minimum_agl_ft,
         assigned_relative_altitude_ft=assigned_relative_altitude_ft,
         arrival_coordinate=landing_coordinate,
@@ -1752,7 +1706,6 @@ def interpret_flight_execution(
             "departure_transition": departure_transition,
             "route_transitions": route_transitions,
             "managed_intersections": managed_intersections,
-            "route_speed_limits": route_speed_limits,
             "failsafe_branches": failsafe_branches,
             "failsafe_jump_map": failsafe_jump_map,
             "arrival_transition": arrival_transition,
