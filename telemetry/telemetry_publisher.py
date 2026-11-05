@@ -47,6 +47,7 @@ def build_telemetry_message(
         "longitude": telemetry.longitude,
         "relative_altitude_ft": telemetry.relative_altitude_ft,
         "absolute_altitude_ft": telemetry.absolute_altitude_ft,
+        "ground_speed_ft_s": telemetry.ground_speed_ft_s,
         "armed": telemetry.armed,
         "heartbeat_active": telemetry.heartbeat_active,
         "mission_sequence": telemetry.mission_sequence,

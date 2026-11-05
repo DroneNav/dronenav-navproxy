@@ -6,7 +6,7 @@ import ssl
 
 import pika
 
-from app.navproxy.telemetry_publisher import (
+from app.navproxy.telemetry.telemetry_publisher import (
     RABBITMQ_HOST,
     RABBITMQ_PORT,
     RABBITMQ_VHOST,

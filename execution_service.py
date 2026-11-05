@@ -124,7 +124,7 @@ from app.models.flight_execution_model import (
 )
 from .flight_band_resolver import resolve_applicable_flight_band
 
-from app.navproxy.telemetry_publisher import TelemetryPublisher
+from app.navproxy.telemetry.telemetry_publisher import TelemetryPublisher
 from app.navproxy.control_consumer import ControlConsumer
 
 from app.navproxy.rse.route_reservation import (
@@ -611,8 +611,9 @@ def _execute_flight_execution(
                 completed=False,
             )
 
-        cruise_speed_ft_s = (
-            read_parameter(connection, "WP_SPD") * 3.28084
+
+        cruise_speed_ft_s = float(
+            commanded_cruise_speed_ft_s
         )
 
         program_scheduled_mission(
@@ -648,6 +649,7 @@ def _execute_flight_execution(
 
         start_scheduled_flight(
             connection=connection,
+            commanded_cruise_speed_ft_s=commanded_cruise_speed_ft_s,
         )
 
         mavlink_telemetry_source = MavlinkTelemetrySource(

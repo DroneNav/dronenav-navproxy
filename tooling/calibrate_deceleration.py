@@ -34,7 +34,7 @@ from app.navproxy.mavlink_telemetry import (
     request_message_interval,
 )
 
-from app.navproxy.telemetry_publisher import (
+from app.navproxy.telemetry.telemetry_publisher import (
     RABBITMQ_HOST,
     RABBITMQ_PORT,
     RABBITMQ_VHOST,

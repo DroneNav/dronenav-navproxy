@@ -130,6 +130,50 @@ def arm_vehicle(
     )
 
 
+def disarm_vehicle(
+    connection: mavutil.mavfile,
+) -> None:
+    """Request disarm and verify the aircraft is disarmed."""
+
+    connection.mav.command_long_send(
+        connection.target_system,
+        connection.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+
+    deadline = time.monotonic() + 5.0
+
+    while time.monotonic() < deadline:
+        response = connection.recv_match(
+            type="HEARTBEAT",
+            blocking=True,
+            timeout=1.0,
+        )
+
+        if response is None:
+            continue
+
+        armed = bool(
+            int(response.base_mode)
+            & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+        )
+
+        if not armed:
+            return
+
+    raise ScheduledFlightStartError(
+        "ArduPilot did not confirm disarm within 5 seconds."
+    )
+
+
 def start_mission(
     connection: mavutil.mavfile,
 ) -> None:
@@ -172,8 +216,62 @@ def start_mission(
         )
 
 
+def set_governed_cruise_speed(
+    connection: mavutil.mavfile,
+    commanded_cruise_speed_ft_s: float,
+) -> None:
+    """Configure and acknowledge the governed cruise speed."""
+
+    if commanded_cruise_speed_ft_s <= 0:
+        raise ScheduledFlightStartError(
+            "Commanded cruise speed must be positive."
+        )
+
+    connection.mav.command_long_send(
+        connection.target_system,
+        connection.target_component,
+        mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+        0,
+        1,
+        commanded_cruise_speed_ft_s * 0.3048,
+        -1,
+        0,
+        0,
+        0,
+        0,
+    )
+
+    deadline = time.monotonic() + 5.0
+
+    while time.monotonic() < deadline:
+        response = connection.recv_match(
+            type="COMMAND_ACK",
+            blocking=True,
+            timeout=1.0,
+        )
+
+        if response is None:
+            continue
+
+        if int(response.command) != mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED:
+            continue
+
+        if int(response.result) != mavutil.mavlink.MAV_RESULT_ACCEPTED:
+            raise ScheduledFlightStartError(
+                "ArduPilot rejected governed cruise speed. "
+                f"Result={int(response.result)}."
+            )
+
+        return
+
+    raise ScheduledFlightStartError(
+        "Timed out waiting for governed cruise speed acknowledgment."
+    )
+
+
 def start_scheduled_flight(
     connection: mavutil.mavfile,
+    commanded_cruise_speed_ft_s: float,
 ) -> None:
     """Start execution of the programmed scheduled mission."""
 
@@ -181,13 +279,64 @@ def start_scheduled_flight(
         connection,
     )
 
-    arm_vehicle(
-        connection,
-    )
+    try:
+        arm_vehicle(
+            connection,
+        )
+    except Exception as exc:
+        try:
+            disarm_vehicle(
+                connection,
+            )
+        except Exception as disarm_exc:
+            raise ScheduledFlightStartError(
+                "Aircraft arming failed, "
+                "and disarm could not be confirmed."
+            ) from disarm_exc
 
-    set_auto_mode(
-        connection,
-    )
+        raise ScheduledFlightStartError(
+            "Aircraft arming failed. Aircraft confirmed disarmed."
+        ) from exc
+
+    try:
+        set_auto_mode(
+            connection,
+        )
+    except Exception as exc:
+        try:
+            disarm_vehicle(
+                connection,
+            )
+        except Exception as disarm_exc:
+            raise ScheduledFlightStartError(
+                "AUTO mode transition failed, "
+                "and aircraft disarm could not be confirmed."
+            ) from disarm_exc
+
+        raise ScheduledFlightStartError(
+            "AUTO mode transition failed. Aircraft disarmed."
+        ) from exc
+
+    try:
+        set_governed_cruise_speed(
+            connection,
+            commanded_cruise_speed_ft_s,
+        )
+    except Exception as exc:
+        try:
+            disarm_vehicle(
+                connection,
+            )
+        except Exception as disarm_exc:
+            raise ScheduledFlightStartError(
+                "Governed cruise speed configuration failed, "
+                "and aircraft disarm could not be confirmed."
+            ) from disarm_exc
+
+        raise ScheduledFlightStartError(
+            "Governed cruise speed configuration failed. "
+            "Aircraft disarmed."
+        ) from exc
 
     start_mission(
         connection,

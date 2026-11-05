@@ -6,6 +6,8 @@ from sqlalchemy import text
 
 from app.config.database import engine
 
+from decimal import Decimal
+
 
 METERS_TO_FEET = 1.0 / 0.3048
 
@@ -20,7 +22,7 @@ def estimate_route_duration_seconds(
         isinstance(commanded_cruise_speed_ft_s, bool)
         or not isinstance(
             commanded_cruise_speed_ft_s,
-            (int, float),
+            (int, float, Decimal),
         )
         or commanded_cruise_speed_ft_s <= 0
     ):
@@ -60,6 +62,6 @@ def estimate_route_duration_seconds(
         float(route_length_meters) * METERS_TO_FEET
     )
 
-    return route_length_ft / commanded_cruise_speed_ft_s
+    return route_length_ft / float(commanded_cruise_speed_ft_s)
 
 
