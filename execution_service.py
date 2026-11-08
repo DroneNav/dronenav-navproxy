@@ -130,6 +130,7 @@ from app.navproxy.control_consumer import ControlConsumer
 from app.navproxy.rse.route_reservation import (
     RouteSlotReservationError,
     reserve_route_slot,
+    release_route_slot,
 )
 
 from app.navproxy.altitude import (
@@ -223,22 +224,42 @@ def run_navproxy_process(
     current_flight_id = flight_id
 
     while True:
-        next_flight_execution = load_next_flight_execution(
-            root_flight_execution_id=root_flight_execution_id,
-            current_flight_execution_id=current_flight_execution_id,
-        )
 
-        result = _execute_flight_execution(
-            root_flight_execution_id=root_flight_execution_id,
-            flight_execution_id=current_flight_execution_id,
-            flight_id=current_flight_id,
-            is_final_flight_execution=(
-                next_flight_execution is None
-            ),
-            preflight_seconds=preflight_seconds,
-            flight_seconds=flight_seconds,
-            connection_string=connection_string,
-        )
+        try:
+            next_flight_execution = load_next_flight_execution(
+                root_flight_execution_id=root_flight_execution_id,
+                current_flight_execution_id=current_flight_execution_id,
+            )
+
+            result = _execute_flight_execution(
+                root_flight_execution_id=root_flight_execution_id,
+                flight_execution_id=current_flight_execution_id,
+                flight_id=current_flight_id,
+                is_final_flight_execution=(
+                    next_flight_execution is None
+                ),
+                preflight_seconds=preflight_seconds,
+                flight_seconds=flight_seconds,
+                connection_string=connection_string,
+            )
+        finally:
+            try:
+                released_count = release_route_slot(
+                    flight_execution_id=current_flight_execution_id,
+                )
+
+                LOGGER.info(
+                    "Route slot termination cleanup: "
+                    "execution=%s released=%s",
+                    current_flight_execution_id,
+                    released_count,
+                )
+            except RouteSlotReservationError:
+                LOGGER.exception(
+                    "Route slot termination cleanup failed: "
+                    "execution=%s",
+                    current_flight_execution_id,
+                )
 
         if not result.completed:
             return
@@ -676,6 +697,8 @@ def _execute_flight_execution(
         tolerance_ft=5.0,
     )
 
+    actual_path_started = False
+
     telemetry_publisher = TelemetryPublisher()
 
     energy_health_model = EnergyHealthModel()
@@ -1012,8 +1035,9 @@ def _execute_flight_execution(
                     flight_id=context.flight_id,
                     coordinates=sampled_coordinates,
                 )
+                actual_path_started = True
 
-            elif sampled_coordinates:
+            elif sampled_coordinates and actual_path_started:
                 update_actual_path(
                     flight_execution_id=context.flight_execution_id,
                     flight_id=context.flight_id,
@@ -2254,11 +2278,12 @@ def _execute_flight_execution(
 
         final_coordinates = actual_path_sampler.finish()
 
-        complete_actual_path(
-            flight_execution_id=context.flight_execution_id,
-            flight_id=context.flight_id,
-            coordinates=final_coordinates or None,
-        )
+        if actual_path_started:
+            complete_actual_path(
+                flight_execution_id=context.flight_execution_id,
+                flight_id=context.flight_id,
+                coordinates=final_coordinates or None,
+            )
 
         complete_scheduled_flight_execution(
             context.flight_execution_id,
@@ -2293,11 +2318,12 @@ def _execute_flight_execution(
 
     final_coordinates = actual_path_sampler.finish()
 
-    complete_actual_path(
-        flight_execution_id=context.flight_execution_id,
-        flight_id=context.flight_id,
-        coordinates=final_coordinates or None,
-    )
+    if actual_path_started:
+        complete_actual_path(
+            flight_execution_id=context.flight_execution_id,
+            flight_id=context.flight_id,
+            coordinates=final_coordinates or None,
+        )
 
     context = replace(
         context,

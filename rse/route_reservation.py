@@ -74,3 +74,38 @@ def reserve_route_slot(
     )
 
 
+def release_route_slot(
+    *,
+    flight_execution_id: str,
+) -> int:
+    """
+    Release Route reservations for a terminated
+    simulated Flight Execution through the API.
+    """
+
+    url = (
+        f"{DEFAULT_API_BASE_URL.rstrip('/')}"
+        f"/api/flight-executions/{flight_execution_id}"
+        f"/route-slot/release"
+    )
+
+    try:
+        response = requests.post(
+            url,
+            headers={"Accept": "application/json"},
+            timeout=DEFAULT_API_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RouteSlotReservationError(
+            f"Could not release Route slots through {url}: {exc}"
+        ) from exc
+
+    try:
+        result = response.json()
+        return int(result["released_count"])
+    except (requests.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise RouteSlotReservationError(
+            "The Route slot release API returned an invalid response."
+        ) from exc
+

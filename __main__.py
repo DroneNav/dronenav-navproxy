@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 
 from .execution_service import run_navproxy_process
 from .reusable_execution_service import run_reusable_navproxy_process
@@ -50,7 +51,45 @@ def _parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+class NavproxyShutdown(Exception):
+    """Requested termination of the NAVProxy process."""
+
+
+def handle_shutdown_signal(signum, frame):
+    logging.warning(
+        "NAVProxy received termination signal %s",
+        signal.Signals(signum).name,
+    )
+
+    for shutdown_signal in (
+        signal.SIGINT,
+        signal.SIGTERM,
+        signal.SIGHUP,
+        signal.SIGQUIT,
+    ):
+        signal.signal(
+            shutdown_signal,
+            signal.SIG_IGN,
+        )
+
+    raise NavproxyShutdown(
+        f"NAVProxy terminated by signal {signum}"
+    )
+
+
 def main() -> None:
+
+    for shutdown_signal in (
+        signal.SIGINT,
+        signal.SIGTERM,
+        signal.SIGHUP,
+        signal.SIGQUIT,
+    ):
+        signal.signal(
+            shutdown_signal,
+            handle_shutdown_signal,
+        )
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
