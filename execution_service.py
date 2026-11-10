@@ -14,10 +14,6 @@ import requests
 import time
 import math
 
-from app.services.route_service import (
-    evaluate_route_segment_conformance,
-)
-
 from .actual_path_sampler import ActualPathSampler
 from .actual_path_service import (
     complete_actual_path,
@@ -115,6 +111,15 @@ from app.navproxy.tooling.calibrate_deceleration import (
 from app.services.aircraft_calibration_profile_service import (
     get_calibration_profiles,
     patch_calibration_profile,
+)
+from app.services.aircraft_service import (
+    get_aircraft_by_id,
+)
+from app.services.route_service import (
+    evaluate_route_segment_conformance,
+)
+from .turns.aircraft_performance import (
+    validate_turn_aircraft_performance,
 )
 from app.models.flight_execution_model import (
     complete_scheduled_flight_execution,
@@ -369,6 +374,27 @@ def _execute_flight_execution(
             commanded_cruise_speed_ft_s,
         ) = resolve_mission_altitude_band( flight_execution )
 
+        aircraft = get_aircraft_by_id(
+            flight_execution["aircraft_id"]
+        )
+
+        if aircraft is None:
+            raise FlightExecutionCompileError(
+                "Aircraft record not found."
+            )
+
+        try:
+            planned_deceleration_ft_s2 = (
+                validate_turn_aircraft_performance(
+                    aircraft,
+                    commanded_cruise_speed_ft_s,
+                )
+            )
+        except ValueError as exc:
+            raise FlightExecutionCompileError(
+                str(exc)
+            ) from exc
+
     except FlightExecutionCompileError:
         release_flight_execution(
             flight_execution_id,
@@ -484,6 +510,8 @@ def _execute_flight_execution(
             minimum_agl_ft=minimum_agl_ft,
             maximum_agl_ft=maximum_agl_ft,
             assigned_relative_altitude_ft=assigned_relative_altitude_ft,
+            commanded_cruise_speed_ft_s=commanded_cruise_speed_ft_s,
+            planned_deceleration_ft_s2=planned_deceleration_ft_s2,
             landing_assignment=landing_assignment,
         )
     except FlightExecutionCompileError:
@@ -1107,13 +1135,7 @@ def _execute_flight_execution(
 
             managed_intersection = None
 
-            if (
-                segment is not None
-                and is_last_segment_of_route(
-                    context.compiler_ir,
-                    segment,
-                )
-            ):
+            if segment is not None:
                 managed_intersection = get_managed_intersection_for_segment(
                     context.compiler_ir,
                     segment,
@@ -1416,10 +1438,13 @@ def _execute_flight_execution(
             if (
                 NAVPROXY_FC_MODE == "mavlink"
                 and intersection_guided_requested
-                and intersection_grant_received_route_node_id is not None
                 and (
                     intersection_grant_received_route_node_id
                     == str(managed_intersection["route_node_id"])
+                    or (
+                        intersection_guided_target_sent
+                        and intersection_state == "reserved"
+                    )
                 )
                 and intersection_state in ("reserved", "occupied")
                 and telemetry.flight_mode == "GUIDED"
@@ -2497,6 +2522,26 @@ def get_route_conformance_segment(
     }
 
 
+def get_departing_managed_intersection(
+    compiler_ir: dict[str, Any],
+    active_route_segment_index: int,
+) -> dict[str, Any] | None:
+    """Return the intersection at the end of the preceding segment."""
+
+    previous_segment = get_route_conformance_segment(
+        compiler_ir,
+        active_route_segment_index - 1,
+    )
+
+    if previous_segment is None:
+        return None
+
+    return get_managed_intersection_for_segment(
+        compiler_ir,
+        previous_segment,
+    )
+
+
 def is_requested_calibration_segment(
     segment: dict[str, Any] | None,
     calibration_request: dict[str, Any] | None,
@@ -2561,14 +2606,10 @@ def is_calibration_route_eligible(
 ) -> bool:
     """Exclude Route segments ending at managed intersections."""
 
-    if is_last_segment_of_route(compiler_ir, segment):
-        if get_managed_intersection_for_segment(
-            compiler_ir,
-            segment,
-        ) is not None:
-            return False
-
-    return True
+    return get_managed_intersection_for_segment(
+        compiler_ir,
+        segment,
+    ) is None
 
 
 def is_calibration_operationally_ready(

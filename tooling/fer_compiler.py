@@ -31,7 +31,6 @@ from app.config.constants import (
     DEFAULT_API_BASE_URL,
     DEFAULT_API_TIMEOUT_SECONDS,
     TRANSITION_DIAMETER_FT,
-    ROUTE_INTERSECTION_HOLDING_SETBACK_FT,
     VERTICAL_CONFORMANCE_MARGIN_FT,
 )
 
@@ -45,6 +44,21 @@ from app.services.geometry_service import (
     build_offset_polyline,
     offset_segment,
 )
+
+from app.services.aircraft_service import get_aircraft_by_id
+from app.navproxy.turns.aircraft_performance import (
+    validate_turn_aircraft_performance,
+)
+from app.navproxy.turns.geometry import identify_route_turns
+
+from app.models.route_model import select_route_node_connections
+from app.models.droneport_model import select_droneport_by_route_node_id
+
+from app.models.geospatial_model import (
+    select_route_holding_coordinate,
+)
+from app.services.route_service import is_managed_route_node
+
 
 class FlightExecutionCompileError(ValueError):
     """Raised when a Flight Execution Record cannot be interpreted."""
@@ -710,6 +724,10 @@ def build_route_assertions(
 
         segment_attributes = route.get("segment_attributes")
 
+        route_node_connections = select_route_node_connections(
+            route_id
+        )
+
         assertions.append(
             {
                 "assertion_type": "NAV_ASSERT_ROUTE",
@@ -725,6 +743,7 @@ def build_route_assertions(
                     "geometry_type": "linestring",
                     "coordinates": geometry["coordinates"],
                     "segment_attributes": segment_attributes,
+                    "route_node_connections": route_node_connections,
                 },
             }
         )
@@ -813,6 +832,22 @@ def build_operational_route_assertions(
                 for attributes in segment_attributes
             ]
 
+        operational_route_node_connections = [
+            {
+                **connection,
+                "waypoint_index": (
+                    len(coordinates) - 1 - connection["waypoint_index"]
+                    if reversed_route
+                    else connection["waypoint_index"]
+                ),
+            }
+            for connection in parameters["route_node_connections"]
+        ]
+
+        operational_route_node_connections.sort(
+            key=lambda connection: connection["waypoint_index"]
+        )
+
         operational_route_assertions.append({
             **route_assertion,
             "parameters": {
@@ -822,6 +857,7 @@ def build_operational_route_assertions(
                 "operational_origin_route_node_id": current_route_node_id,
                 "operational_destination_route_node_id": next_route_node_id,
                 "operational_reversed": reversed_route,
+                "route_node_connections": operational_route_node_connections,
             },
         })
 
@@ -1101,14 +1137,81 @@ def build_verified_route_mission_ranges(
                 f"Route index {route_index}."
             )
 
+        managed_intersections = []
+
+        for intersection in compiler_ir["mission"].get(
+            "managed_intersections", []
+        ):
+            if intersection["from_route_index"] != route_index:
+                continue
+
+            from_segment_index = intersection[
+                "from_route_segment_index"
+            ]
+            to_route_index = intersection["to_route_index"]
+            to_segment_index = intersection[
+                "to_route_segment_index"
+            ]
+
+            if to_route_index == route_index:
+                departure_sequence = segment_mission_sequences[
+                    to_segment_index
+                ]
+            else:
+                departure_sequence = None
+
+            droneport = select_droneport_by_route_node_id(
+                intersection["route_node_id"]
+            )
+
+            if droneport is None:
+                raise ValueError(
+                    "Managed intersection has no DronePort: "
+                    f"{intersection['route_node_id']}"
+                )
+
+            managed_intersections.append({
+                **intersection,
+                "intersection_latitude": float(droneport["latitude"]),
+                "intersection_longitude": float(droneport["longitude"]),
+                "intersection_diameter_ft": float(
+                    droneport["droneport_diameter_ft"]
+                ),
+                "approach_mission_sequence": (
+                    segment_mission_sequences[from_segment_index]
+                ),
+                "departure_mission_sequence": departure_sequence,
+            })
+
         route_ranges.append(
             {
                 "route_index": route_index,
                 "start_mission_sequence": min(route_sequences),
                 "end_mission_sequence": max(route_sequences),
                 "segment_mission_sequences": segment_mission_sequences,
+                "managed_intersections": managed_intersections,
             }
         )
+
+    route_ranges_by_index = {
+        route_range["route_index"]: route_range
+        for route_range in route_ranges
+    }
+
+    for route_range in route_ranges:
+        for intersection in route_range["managed_intersections"]:
+            if intersection["departure_mission_sequence"] is not None:
+                continue
+
+            outgoing_route = route_ranges_by_index[
+                intersection["to_route_index"]
+            ]
+
+            intersection["departure_mission_sequence"] = (
+                outgoing_route["segment_mission_sequences"][
+                    intersection["to_route_segment_index"]
+                ]
+            )
 
     return route_ranges
 
@@ -1366,81 +1469,92 @@ def build_arrival_transition(
 
 def build_managed_intersections(
     route_assertions: list[dict[str, Any]],
+    route_conformance_segments: list[dict[str, Any]],
     side: str,
 ) -> list[dict[str, Any]]:
     """Build managed intersections along the ordered Route path."""
 
     managed_intersections: list[dict[str, Any]] = []
 
-    for route_index in range(len(route_assertions) - 1):
+    for segment_position in range(
+        len(route_conformance_segments) - 1
+    ):
+        incoming_segment = route_conformance_segments[
+            segment_position
+        ]
+        outgoing_segment = route_conformance_segments[
+            segment_position + 1
+        ]
+
+        route_node_id = incoming_segment["end_route_node_id"]
+
+        if route_node_id is None:
+            continue
+
+        if not is_managed_route_node(route_node_id):
+            continue
+
+        route_index = incoming_segment["route_index"]
+
+        next_route_index = outgoing_segment["route_index"]
+
         current_parameters = route_assertions[
             route_index
         ]["parameters"]
+
         next_parameters = route_assertions[
-            route_index + 1
+            next_route_index
         ]["parameters"]
 
-        route_node_id = current_parameters[
-            "operational_destination_route_node_id"
-        ]
+        is_route_boundary = (
+            route_index != next_route_index
+        )
 
-        next_route_node_id = next_parameters[
-            "operational_origin_route_node_id"
-        ]
-
-        if str(route_node_id) != str(next_route_node_id):
-            raise FlightExecutionCompileError(
-                "Adjacent operational Routes do not share "
-                "the same Route Node."
+        if is_route_boundary:
+            holding_field = (
+                "reverse_holding_coordinate"
+                if current_parameters["operational_reversed"]
+                else "forward_holding_coordinate"
             )
 
-        topology = load_api_object(
-            endpoint=(
-                "/api/routes/managed-intersection/"
-                f"{route_node_id}"
-            ),
-            object_name="managed intersection topology",
-        )
-
-        if topology.get("managed") is not True:
-            continue
-
-        holding_field = (
-            "reverse_holding_coordinate"
-            if current_parameters["operational_reversed"]
-            else "forward_holding_coordinate"
-        )
-
-        holding_coordinate = current_parameters["segment_attributes"][-1].get(holding_field)
+            holding_coordinate = current_parameters[
+                "segment_attributes"
+            ][-1].get(holding_field)
+        else:
+            holding_coordinate = select_route_holding_coordinate(
+                endpoint=incoming_segment["end_coordinate"],
+                adjacent_coordinate=incoming_segment["start_coordinate"],
+                setback_ft=incoming_segment["route_width_ft"],
+            )
 
         if holding_coordinate is None:
             raise FlightExecutionCompileError(
                 "Managed intersection holding coordinate is missing "
-                f"for Route {current_parameters['route_id']}."
+                f"for Route {current_parameters['route_id']} "
+                f"segment {incoming_segment['route_segment_index']}."
             )
 
-        coordinates = current_parameters["coordinates"]
-        route_width_ft = current_parameters["segment_attributes"][-1][
-            "route_width_ft"
-        ]
+        start_coordinate = incoming_segment["start_coordinate"]
+        end_coordinate = incoming_segment["end_coordinate"]
+        route_width_ft = incoming_segment["route_width_ft"]
 
         offset_ft = route_width_ft / 4.0
         if side == "left":
             offset_ft = -offset_ft
 
         offset_start, offset_end = offset_segment(
-            coordinates[-2],
-            coordinates[-1],
+            start_coordinate,
+            end_coordinate,
             offset_ft,
         )
 
         holding_coordinate = [
-            holding_coordinate[0] + offset_end[0] - coordinates[-1][0],
-            holding_coordinate[1] + offset_end[1] - coordinates[-1][1],
+            holding_coordinate[0] + offset_end[0] - end_coordinate[0],
+            holding_coordinate[1] + offset_end[1] - end_coordinate[1],
         ]
 
         pause_setback_ft = TRANSITION_DIAMETER_FT / 2
-        hold_setback_ft = ROUTE_INTERSECTION_HOLDING_SETBACK_FT
+        hold_setback_ft = incoming_segment["route_width_ft"]
 
         test_pause_coordinate = [
             offset_end[0]
@@ -1456,7 +1570,13 @@ def build_managed_intersections(
             "from_route_id": current_parameters["route_id"],
             "to_route_id": next_parameters["route_id"],
             "from_route_index": route_index,
-            "to_route_index": route_index + 1,
+            "from_route_segment_index": incoming_segment[
+                "route_segment_index"
+            ],
+            "to_route_index": next_route_index,
+            "to_route_segment_index": outgoing_segment[
+                "route_segment_index"
+            ],
             "holding_coordinate": holding_coordinate,
             "test_pause_coordinate": test_pause_coordinate,
         })
@@ -1511,6 +1631,13 @@ def build_route_conformance_segments(
         segment_attributes = parameters["segment_attributes"]
         lane_coordinates = route_lanes[route_index]
 
+        route_node_by_index = {
+            connection["waypoint_index"]: str(
+                connection["route_node_id"]
+            )
+            for connection in parameters["route_node_connections"]
+        }
+
         for segment_index in range(len(coordinates) - 1):
             start_coordinate = coordinates[segment_index]
             end_coordinate = coordinates[segment_index + 1]
@@ -1527,6 +1654,9 @@ def build_route_conformance_segments(
                 "route_width_ft": attributes["route_width_ft"],
                 "ground_elevation_ft": attributes["ground_elevation_ft"],
                 "failsafe_coordinate": attributes.get("failsafe_coordinate"),
+                "end_route_node_id": route_node_by_index.get(
+                    segment_index + 1
+                ),
             })
 
     return conformance_segments
@@ -1538,6 +1668,8 @@ def interpret_flight_execution(
     minimum_agl_ft: int | float,
     maximum_agl_ft: int | float,
     assigned_relative_altitude_ft: int | float,
+    commanded_cruise_speed_ft_s: float,
+    planned_deceleration_ft_s2: float,
     landing_assignment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
@@ -1647,6 +1779,10 @@ def interpret_flight_execution(
         side="right",
     )
 
+    route_turns = identify_route_turns(
+        route_conformance_segments,
+    )
+
     launch_parameters = launch_assertion["parameters"]
     departure_coordinate = launch_parameters["coordinate"]
 
@@ -1657,6 +1793,7 @@ def interpret_flight_execution(
 
     managed_intersections = build_managed_intersections(
         route_assertions,
+        route_conformance_segments,
         side="right",
     )
 
@@ -1703,6 +1840,7 @@ def interpret_flight_execution(
             "maximum_agl_ft": maximum_agl_ft,
             "route_waypoint_ranges": route_waypoint_ranges,
             "route_conformance_segments": route_conformance_segments,
+            "route_turns": route_turns,
             "departure_transition": departure_transition,
             "route_transitions": route_transitions,
             "managed_intersections": managed_intersections,
@@ -1720,6 +1858,8 @@ def compile_flight_execution(
     minimum_agl_ft: int | float,
     maximum_agl_ft: int | float,
     assigned_relative_altitude_ft: int | float,
+    commanded_cruise_speed_ft_s: float,
+    planned_deceleration_ft_s2: float,
     landing_assignment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile an already-loaded FER into the NAVProxy IR."""
@@ -1735,6 +1875,8 @@ def compile_flight_execution(
         minimum_agl_ft=minimum_agl_ft,
         maximum_agl_ft=maximum_agl_ft,
         assigned_relative_altitude_ft=assigned_relative_altitude_ft,
+        commanded_cruise_speed_ft_s=commanded_cruise_speed_ft_s,
+        planned_deceleration_ft_s2=planned_deceleration_ft_s2,
         landing_assignment=landing_assignment,
     )
 
@@ -2091,12 +2233,32 @@ def main() -> int:
             minimum_agl_ft + VERTICAL_CONFORMANCE_MARGIN_FT
         )
 
+        aircraft = get_aircraft_by_id(
+            flight_execution["aircraft_id"]
+        )
+
+        if aircraft is None:
+            raise FlightExecutionCompileError(
+                "Aircraft record not found."
+            )
+
+        try:
+            planned_deceleration_ft_s2 = (
+                validate_turn_aircraft_performance(aircraft)
+            )
+        except ValueError as exc:
+            raise FlightExecutionCompileError(
+                str(exc)
+            ) from exc
+
         assertion_stream = compile_flight_execution(
             flight_execution=flight_execution,
             flight_band_id=flight_band_id,
             minimum_agl_ft=minimum_agl_ft,
             maximum_agl_ft=maximum_agl_ft,
             assigned_relative_altitude_ft=assigned_relative_altitude_ft,
+            commanded_cruise_speed_ft_s=commanded_cruise_speed_ft_s,
+            planned_deceleration_ft_s2=planned_deceleration_ft_s2,
         )
 
         json.dump(assertion_stream, sys.stdout, indent=2)

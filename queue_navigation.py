@@ -187,11 +187,25 @@ def get_managed_intersection_for_segment(
     segment: dict,
 ) -> dict | None:
     """Find the managed intersection approached by this Route segment."""
+
     for intersection in compiler_ir["mission"].get(
         "managed_intersections", []
     ):
-        if intersection["from_route_index"] == segment["route_index"]:
-            return intersection
+        if intersection["from_route_index"] != segment["route_index"]:
+            continue
+
+        intersection_segment_index = intersection.get(
+            "from_route_segment_index"
+        )
+
+        if intersection_segment_index is not None:
+            if (
+                intersection_segment_index
+                != segment["route_segment_index"]
+            ):
+                continue
+
+        return intersection
 
     return None
 

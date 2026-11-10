@@ -18,9 +18,6 @@ from app.navproxy.telemetry.telemetry_publisher import (
 from app.models.flight_execution_model import (
     select_flight_execution_route_ranges,
 )
-from app.models.intersection_state_model import (
-    select_intersection_state,
-)
 from app.models.route_occupancy_state_model import (
     select_route_occupancy_state,
     update_route_occupancy_state,
@@ -201,32 +198,72 @@ def get_route_for_mission_sequence(
     return None, None, None
 
 
-def get_next_route_for_route_id(
+def get_managed_intersections_for_mission_sequence(
     route_ranges: list[dict],
-    route_id,
-):
-    """Return the Route immediately following the specified Route."""
+    mission_sequence: int,
+) -> tuple[dict | None, dict | None]:
+    """
+    Return intersections being approached or departed.
 
-    for index, route in enumerate(route_ranges):
-        if str(route["route_id"]) == str(route_id):
-            if index + 1 < len(route_ranges):
-                return route_ranges[index + 1]
+    The outgoing intersection begins at its approach sequence.
+    The incoming intersection remains relevant after its
+    departure sequence until geographic clearance.
+    """
 
-            return None
+    outgoing_intersection = None
+    incoming_intersection = None
+
+    for route in route_ranges:
+        for intersection in route.get(
+            "managed_intersections", []
+        ):
+            approach_sequence = intersection[
+                "approach_mission_sequence"
+            ]
+            departure_sequence = intersection[
+                "departure_mission_sequence"
+            ]
+
+            if (
+                approach_sequence <= mission_sequence
+                < departure_sequence
+            ):
+                if (
+                    outgoing_intersection is None
+                    or approach_sequence
+                    > outgoing_intersection[
+                        "approach_mission_sequence"
+                    ]
+                ):
+                    outgoing_intersection = intersection
+
+            if mission_sequence >= departure_sequence:
+                if (
+                    incoming_intersection is None
+                    or departure_sequence
+                    > incoming_intersection[
+                        "departure_mission_sequence"
+                    ]
+                ):
+                    incoming_intersection = intersection
+
+    return outgoing_intersection, incoming_intersection
+
+
+def get_flight_managed_intersection(
+    route_ranges: list[dict],
+    route_node_id,
+) -> dict | None:
+    """Return a Flight Execution's managed intersection by Route Node."""
+
+    for route in route_ranges:
+        for intersection in route.get(
+            "managed_intersections", []
+        ):
+            if str(intersection["route_node_id"]) == str(route_node_id):
+                return intersection
 
     return None
-
-
-def get_managed_intersection_route_node(
-    route: dict,
-    next_route: dict | None,
-):
-    """Return the cached managed intersection Route Node."""
-
-    if next_route is None:
-        return None
-
-    return route.get("intersection_route_node_id")
 
 
 def distance_between_coordinates_ft(
@@ -319,23 +356,37 @@ def process_telemetry(message: dict) -> list[dict] | None:
     if route is None:
         return
 
-    incoming_intersection_route = (
-        previous_route
-        if (
-            previous_route is not None
-            and previous_route.get("intersection_route_node_id") is not None
+    outgoing_intersection, incoming_intersection = (
+        get_managed_intersections_for_mission_sequence(
+            route_ranges,
+            int(mission_sequence),
         )
-        else None
     )
 
-    outgoing_intersection_route = (
-        route
-        if (
-            next_route is not None
-            and route.get("intersection_route_node_id") is not None
-        )
-        else None
-    )
+    outgoing_intersection_from_route = None
+    outgoing_intersection_to_route = None
+
+    if outgoing_intersection is not None:
+        outgoing_intersection_from_route = route_ranges[
+            outgoing_intersection["from_route_index"]
+        ]
+        outgoing_intersection_to_route = route_ranges[
+            outgoing_intersection["to_route_index"]
+        ]
+
+    incoming_intersection_from_route = None
+    incoming_intersection_to_route = None
+
+    if incoming_intersection is not None:
+        incoming_intersection_from_route = route_ranges[
+            incoming_intersection["from_route_index"]
+        ]
+        incoming_intersection_to_route = route_ranges[
+            incoming_intersection["to_route_index"]
+        ]
+
+    incoming_intersection_route = incoming_intersection
+    outgoing_intersection_route = outgoing_intersection
 
     is_inside_incoming_intersection = (
         incoming_intersection_route is not None
@@ -410,22 +461,18 @@ def process_telemetry(message: dict) -> list[dict] | None:
         "segment_mission_sequences"
     )
 
-    is_last_route_segment = (
-        isinstance(segment_mission_sequences, list)
-        and bool(segment_mission_sequences)
-        and int(mission_sequence)
-        == segment_mission_sequences[-1]
+    managed_route_node_id = (
+        outgoing_intersection["route_node_id"]
+        if outgoing_intersection is not None
+        else None
     )
 
-    managed_route_node_id = None
-
-    if is_last_route_segment:
-        managed_route_node_id = (
-            get_managed_intersection_route_node(
-                route,
-                next_route,
-            )
-        )
+    is_intersection_approach = (
+        outgoing_intersection is not None
+        and outgoing_intersection["approach_mission_sequence"]
+        <= int(mission_sequence)
+        < outgoing_intersection["departure_mission_sequence"]
+    )
 
     is_incoming_clearance_candidate = (
         incoming_intersection_route is not None
@@ -447,8 +494,8 @@ def process_telemetry(message: dict) -> list[dict] | None:
         and not is_incoming_clearance_candidate
         and isinstance(segment_mission_sequences, list)
         and segment_mission_sequences
-        and int(mission_sequence)
-        not in segment_mission_sequences
+        and not is_intersection_approach
+        and int(mission_sequence) not in segment_mission_sequences
     ):
         return
 
@@ -487,13 +534,9 @@ def process_telemetry(message: dict) -> list[dict] | None:
         == int(mission_sequence)
         and not is_inside_intersection_radius
         and not is_incoming_clearance_candidate
+        and not is_intersection_approach
     ):
         return
-
-    is_new_segment_sequence = (
-        last_processed_segment_sequence is None
-        or last_processed_segment_sequence != int(mission_sequence)
-    )
 
     intersection_occupancy = None
     navproxy_messages = []
@@ -509,37 +552,32 @@ def process_telemetry(message: dict) -> list[dict] | None:
                 )
             )
 
-        incoming_route_node_id = None
+        incoming_route_node_id = (
+            incoming_intersection["route_node_id"]
+            if incoming_intersection is not None
+            else None
+        )
 
-        if incoming_intersection_route is not None:
-            incoming_route_node_id = (
-                incoming_intersection_route.get(
-                    "intersection_route_node_id"
-                )
-            )
+        outgoing_route_node_id = (
+            outgoing_intersection["route_node_id"]
+            if outgoing_intersection is not None
+            else None
+        )
 
-        intersection_from_route = None
-        intersection_to_route = None
-
-        outgoing_route_node_id = None
-
-        if outgoing_intersection_route is not None:
-            outgoing_route_node_id = (
-                outgoing_intersection_route.get(
-                    "intersection_route_node_id"
-                )
-            )
-
-        if incoming_route_node_id is not None:
-            intersection_from_route = previous_route
-            intersection_to_route = route
+        intersection_from_route = (
+            incoming_intersection_from_route
+        )
+        intersection_to_route = (
+            incoming_intersection_to_route
+        )
 
         if (
-            is_new_segment_sequence
-            and managed_route_node_id is not None
+            is_intersection_approach
             and intersection_occupancy is not None
+            and intersection_occupancy["state"] == "active"
+            and intersection_occupancy["intersection_hold_route_node_id"] is None
         ):
-            intersection_state_id = reserve_intersection_slot(
+            current_intersection_state = select_intersection_state(
                 connection,
                 route_node_id=managed_route_node_id,
                 flight_band_id=intersection_occupancy[
@@ -550,34 +588,73 @@ def process_telemetry(message: dict) -> list[dict] | None:
                         "assigned_relative_altitude_ft"
                     ]
                 ),
-                flight_execution_id=flight_execution_id,
-                from_route_id=route["route_id"],
-                to_route_id=next_route["route_id"],
             )
 
-            if intersection_state_id is not None:
-                navproxy_messages.append({
-                    "message_type": "intersection.granted",
-                    "flight_execution_id": str(flight_execution_id),
-                    "payload": {
-                        "route_node_id": str(managed_route_node_id),
-                        "intersection_state_id": str(intersection_state_id),
-                    },
-                })
-
-                LOGGER.info(
-                    "Managed intersection reserved: "
-                    "flight_execution_id=%s "
-                    "route_node_id=%s "
-                    "from_route_id=%s "
-                    "to_route_id=%s "
-                    "intersection_state_id=%s",
-                    flight_execution_id,
-                    managed_route_node_id,
-                    route["route_id"],
-                    next_route["route_id"],
-                    intersection_state_id,
+            already_owned = (
+                current_intersection_state is not None
+                and current_intersection_state["state"] in (
+                    "reserved",
+                    "occupied",
                 )
+                and str(current_intersection_state["flight_execution_id"])
+                == str(flight_execution_id)
+                and str(current_intersection_state["from_route_id"])
+                == str(outgoing_intersection_from_route["route_id"])
+                and str(current_intersection_state["to_route_id"])
+                == str(outgoing_intersection_to_route["route_id"])
+            )
+
+            if already_owned:
+                intersection_state_id = current_intersection_state[
+                    "intersection_state_id"
+                ]
+                newly_reserved = False
+            else:
+                intersection_state_id, newly_reserved = reserve_intersection_slot(
+                    connection,
+                    route_node_id=managed_route_node_id,
+                    flight_band_id=intersection_occupancy[
+                        "flight_band_id"
+                    ],
+                    assigned_relative_altitude_ft=int(
+                        intersection_occupancy[
+                            "assigned_relative_altitude_ft"
+                        ]
+                    ),
+                    flight_execution_id=flight_execution_id,
+                    from_route_id=outgoing_intersection_from_route[
+                        "route_id"
+                    ],
+                    to_route_id=outgoing_intersection_to_route[
+                        "route_id"
+                    ],
+                    return_status=True,
+                )
+
+            if intersection_state_id is not None:
+                if newly_reserved:
+                    navproxy_messages.append({
+                        "message_type": "intersection.granted",
+                        "flight_execution_id": str(flight_execution_id),
+                        "payload": {
+                            "route_node_id": str(managed_route_node_id),
+                            "intersection_state_id": str(intersection_state_id),
+                        },
+                    })
+
+                    LOGGER.info(
+                        "Managed intersection reserved: "
+                        "flight_execution_id=%s "
+                        "route_node_id=%s "
+                        "from_route_id=%s "
+                        "to_route_id=%s "
+                        "intersection_state_id=%s",
+                        flight_execution_id,
+                        managed_route_node_id,
+                        outgoing_intersection_from_route["route_id"],
+                        outgoing_intersection_to_route["route_id"],
+                        intersection_state_id,
+                    )
             else:
                 hold_state_id = set_route_intersection_hold(
                     connection,
@@ -657,10 +734,12 @@ def process_telemetry(message: dict) -> list[dict] | None:
             and outgoing_intersection_state["state"] == "reserved"
             and str(outgoing_intersection_state["flight_execution_id"])
             == str(flight_execution_id)
+
             and str(outgoing_intersection_state["from_route_id"])
-            == str(route["route_id"])
+            == str(outgoing_intersection_from_route["route_id"])
+
             and str(outgoing_intersection_state["to_route_id"])
-            == str(next_route["route_id"])
+            == str(outgoing_intersection_to_route["route_id"])
         ):
             outgoing_reserved_state_id = (
                 outgoing_intersection_state["intersection_state_id"]
@@ -809,9 +888,10 @@ def process_telemetry(message: dict) -> list[dict] | None:
 
         is_beyond_intersection = (
             occupied_intersection_state_id is not None
+            and incoming_intersection is not None
+            and int(mission_sequence)
+            >= incoming_intersection["departure_mission_sequence"]
             and is_incoming_clearance_candidate
-            and previous_route is not None
-            and route is intersection_to_route
         )
 
         if is_beyond_intersection:
@@ -850,6 +930,7 @@ def process_telemetry(message: dict) -> list[dict] | None:
                             "assigned_relative_altitude_ft"
                         ]
                     ),
+                    exclude_flight_execution_id=flight_execution_id,
                 )
 
                 if next_hold is not None:
@@ -857,10 +938,23 @@ def process_telemetry(message: dict) -> list[dict] | None:
                         str(next_hold["flight_execution_id"])
                     )
 
-                    waiting_next_route = get_next_route_for_route_id(
-                        waiting_route_ranges,
-                        next_hold["route_id"],
+                    waiting_intersection = (
+                        get_flight_managed_intersection(
+                            waiting_route_ranges,
+                            incoming_route_node_id,
+                        )
                     )
+
+                    waiting_next_route = None
+                    waiting_from_route = None
+
+                    if waiting_intersection is not None:
+                        waiting_from_route = waiting_route_ranges[
+                            waiting_intersection["from_route_index"]
+                        ]
+                        waiting_next_route = waiting_route_ranges[
+                            waiting_intersection["to_route_index"]
+                        ]
 
                     if waiting_next_route is not None:
                         granted_state_id = reserve_intersection_slot(
@@ -873,7 +967,7 @@ def process_telemetry(message: dict) -> list[dict] | None:
                             flight_execution_id=next_hold[
                                 "flight_execution_id"
                             ],
-                            from_route_id=next_hold["route_id"],
+                            from_route_id=waiting_from_route["route_id"],
                             to_route_id=waiting_next_route["route_id"],
                         )
 
@@ -943,7 +1037,18 @@ def process_telemetry(message: dict) -> list[dict] | None:
                     ] / 2.0,
                 )
 
-        if is_new_segment_sequence and previous_route_id is not None:
+        current_route_occupancy = select_route_occupancy_state(
+            connection,
+            route_id=route_id,
+            flight_execution_id=flight_execution_id,
+        )
+
+        is_new_route_entry = (
+            current_route_occupancy is not None
+            and current_route_occupancy["state"] == "planned"
+        )
+
+        if is_new_route_entry and previous_route_id is not None:
             update_route_occupancy_state(
                 connection,
                 route_id=previous_route_id,
@@ -953,7 +1058,7 @@ def process_telemetry(message: dict) -> list[dict] | None:
                 state="exited",
             )
 
-        if is_new_segment_sequence:
+        if is_new_route_entry or is_final_route_exit:
             update_route_occupancy_state(
                 connection,
                 route_id=route_id,
