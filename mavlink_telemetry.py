@@ -138,6 +138,12 @@ class MavlinkTelemetrySource:
 
         request_message_interval(
             connection,
+            message_id=mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE,
+            frequency_hz=5.0,
+        )
+
+        request_message_interval(
+            connection,
             message_id=mavutil.mavlink.MAVLINK_MSG_ID_MISSION_CURRENT,
             frequency_hz=2.0,
         )
@@ -178,6 +184,12 @@ class MavlinkTelemetrySource:
             request_message_interval(
                 connection,
                 message_id=mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT,
+                frequency_hz=5.0,
+            )
+
+            request_message_interval(
+                connection,
+                message_id=mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE,
                 frequency_hz=5.0,
             )
 
@@ -270,6 +282,10 @@ class MavlinkTelemetrySource:
         gps_epv: int | None = None
         navigation_health: str | None = None
         vehicle_health: str | None = None
+        roll_degrees: float | None = None
+        pitch_degrees: float | None = None
+        yaw_degrees: float | None = None
+        last_attitude_at: float | None = None
 
         while True:
             if heartbeat_lost_at is not None:
@@ -280,6 +296,10 @@ class MavlinkTelemetrySource:
                     battery_percent = None
                     navigation_health = None
                     vehicle_health = None
+                    roll_degrees = None
+                    pitch_degrees = None
+                    yaw_degrees = None
+                    last_attitude_at = None
                     continue
 
                 recovery_age = (
@@ -307,6 +327,7 @@ class MavlinkTelemetrySource:
                         "MISSION_CURRENT",
                         "SYS_STATUS",
                         "GPS_RAW_INT",
+                        "ATTITUDE",
                     ],
                     blocking=False,
                 )
@@ -334,6 +355,13 @@ class MavlinkTelemetrySource:
                 continue
 
             message_type = message.get_type()
+
+            if message_type == "ATTITUDE":
+                roll_degrees = math.degrees(float(message.roll))
+                pitch_degrees = math.degrees(float(message.pitch))
+                yaw_degrees = math.degrees(float(message.yaw))
+                last_attitude_at = time.monotonic()
+                continue
 
             if message_type == "HEARTBEAT":
                 if not is_flight_controller_heartbeat(
@@ -382,6 +410,11 @@ class MavlinkTelemetrySource:
             if message_type != "GLOBAL_POSITION_INT":
                 continue
 
+            attitude_is_fresh = (
+                last_attitude_at is not None
+                and time.monotonic() - last_attitude_at <= 2.0
+            )
+
             yield TelemetryReading(
                 ground_speed_ft_s=(
                     math.hypot(
@@ -405,5 +438,14 @@ class MavlinkTelemetrySource:
                 navigation_health=navigation_health,
                 vehicle_health=vehicle_health,
                 flight_mode=flight_mode,
+                roll_degrees=(
+                    roll_degrees if attitude_is_fresh else None
+                ),
+                pitch_degrees=(
+                    pitch_degrees if attitude_is_fresh else None
+                ),
+                yaw_degrees=(
+                    yaw_degrees if attitude_is_fresh else None
+                ),
             )
 

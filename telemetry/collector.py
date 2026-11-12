@@ -49,6 +49,9 @@ TELEMETRY_COLUMNS = [
   "energy_health",
   "navigation_health",
   "vehicle_health",
+  "roll_degrees",
+  "pitch_degrees",
+  "yaw_degrees",
 ]
 
 

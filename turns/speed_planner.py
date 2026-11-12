@@ -1,3 +1,6 @@
+from .braking import calculate_braking_distance_ft
+
+
 def calculate_deceleration_distance(
     cruise_speed_ft_s: float,
     turn_speed_ft_s: float,
@@ -14,9 +17,9 @@ def calculate_deceleration_distance(
     if turn_speed_ft_s > cruise_speed_ft_s:
         raise ValueError("Turn speed cannot exceed cruise speed.")
 
-    if deceleration_ft_s2 <= 0:
-        raise ValueError("Deceleration must be positive.")
+    return calculate_braking_distance_ft(
+        cruise_speed_ft_s,
+        turn_speed_ft_s,
+        deceleration_ft_s2,
+    )
 
-    return (
-        cruise_speed_ft_s ** 2 - turn_speed_ft_s ** 2
-    ) / (2 * deceleration_ft_s2)

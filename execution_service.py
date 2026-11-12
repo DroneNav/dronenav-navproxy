@@ -131,7 +131,7 @@ from .flight_band_resolver import resolve_applicable_flight_band
 
 from app.navproxy.telemetry.telemetry_publisher import TelemetryPublisher
 from app.navproxy.control_consumer import ControlConsumer
-
+from app.navproxy.turns.observer import observe_active_turns
 from app.navproxy.rse.route_reservation import (
     RouteSlotReservationError,
     reserve_route_slot,
@@ -1667,6 +1667,28 @@ def _execute_flight_execution(
                 context.active_operational_element == "route"
                 and segment is not None
             ):
+                turn_observations = []
+
+                if os.getenv(
+                    "NAVPROXY_TURN_OBSERVATION_ENABLED",
+                    "false",
+                ).lower() == "true":
+                    try:
+                        turn_observations = observe_active_turns(
+                            telemetry,
+                            context.compiler_ir,
+                            context.active_route_segment_index,
+                        )
+                        for observation in turn_observations:
+                            telemetry_publisher.publish_turn_observation(
+                                flight_execution_id=context.flight_execution_id,
+                                observation=observation,
+                            )
+                    except Exception:
+                        LOGGER.exception(
+                            "Turn observation failed."
+                        )
+
                 conformance = evaluate_route_conformance(
                     telemetry,
                     segment,

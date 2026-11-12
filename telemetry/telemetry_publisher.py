@@ -16,7 +16,7 @@ RABBITMQ_VHOST = "prototype"
 
 TELEMETRY_EXCHANGE = "dronenav.telemetry"
 TELEMETRY_ROUTING_KEY = "telemetry.raw"
-
+TURN_OBSERVATION_ROUTING_KEY = "turn.observation"
 
 def get_rabbitmq_credentials() -> tuple[str, str]:
     username = os.environ.get("TELEMETRY_USER")
@@ -48,6 +48,9 @@ def build_telemetry_message(
         "relative_altitude_ft": telemetry.relative_altitude_ft,
         "absolute_altitude_ft": telemetry.absolute_altitude_ft,
         "ground_speed_ft_s": telemetry.ground_speed_ft_s,
+        "roll_degrees": telemetry.roll_degrees,
+        "pitch_degrees": telemetry.pitch_degrees,
+        "yaw_degrees": telemetry.yaw_degrees,
         "armed": telemetry.armed,
         "heartbeat_active": telemetry.heartbeat_active,
         "mission_sequence": telemetry.mission_sequence,
@@ -55,6 +58,20 @@ def build_telemetry_message(
         "energy_health": telemetry.energy_health,
         "navigation_health": telemetry.navigation_health,
         "vehicle_health": telemetry.vehicle_health,
+    }
+
+
+def build_turn_observation_message(
+    *,
+    flight_execution_id: str,
+    observation: dict[str, Any],
+) -> dict[str, Any]:
+    """Build one turn observation message."""
+
+    return {
+        **observation,
+        "flight_execution_id": flight_execution_id,
+        "observed_at": observation["observed_at"].isoformat(),
     }
 
 
@@ -80,6 +97,8 @@ class TelemetryPublisher:
                 ssl_context,
                 RABBITMQ_HOST,
             ),
+            socket_timeout=5,
+            blocked_connection_timeout=5,
         )
 
         self._connection = pika.BlockingConnection(parameters)
@@ -103,6 +122,29 @@ class TelemetryPublisher:
         self._channel.basic_publish(
             exchange=TELEMETRY_EXCHANGE,
             routing_key=TELEMETRY_ROUTING_KEY,
+            body=json.dumps(message).encode("utf-8"),
+            properties=pika.BasicProperties(
+                content_type="application/json",
+                delivery_mode=2,
+            ),
+        )
+
+    def publish_turn_observation(
+        self,
+        *,
+        flight_execution_id: str,
+        observation: dict[str, Any],
+    ) -> None:
+        """Publish one turn observation."""
+
+        message = build_turn_observation_message(
+            flight_execution_id=flight_execution_id,
+            observation=observation,
+        )
+
+        self._channel.basic_publish(
+            exchange=TELEMETRY_EXCHANGE,
+            routing_key=TURN_OBSERVATION_ROUTING_KEY,
             body=json.dumps(message).encode("utf-8"),
             properties=pika.BasicProperties(
                 content_type="application/json",

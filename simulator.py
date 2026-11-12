@@ -30,6 +30,9 @@ class TelemetryReading:
     vehicle_health: str | None = None
     flight_mode: str | None = None
     ground_speed_ft_s: float | None = None
+    roll_degrees: float | None = None
+    pitch_degrees: float | None = None
+    yaw_degrees: float | None = None
 
 
 class FlightSimulator:
