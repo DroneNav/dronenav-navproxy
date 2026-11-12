@@ -2,9 +2,12 @@ import math
 from typing import Any
 
 from app.services.route_service import get_coordinate_distance
+from app.services.geometry_service import calculate_turn_angle
 
+from app.config.constants import (
+    MINIMUM_TURN_ANGLE_DEG,
+)
 
-TURN_MINIMUM_ANGLE_DEGREES = 5.0
 
 
 def calculate_segment_length_ft(
@@ -28,46 +31,6 @@ def calculate_segment_length_ft(
     return float(result["distance_ft"])
 
 
-def calculate_turn_angle(
-  incoming_start: list[float],
-  vertex: list[float],
-  outgoing_end: list[float],
-) -> float:
-  """Calculate the direction change between two lane segments."""
-
-  latitude_radians = math.radians(vertex[1])
-
-  longitude_scale = math.cos(latitude_radians)
-
-  incoming_x = (
-    vertex[0] - incoming_start[0]
-  ) * longitude_scale
-  incoming_y = vertex[1] - incoming_start[1]
-
-  outgoing_x = (
-    outgoing_end[0] - vertex[0]
-  ) * longitude_scale
-  outgoing_y = outgoing_end[1] - vertex[1]
-
-  incoming_length = math.hypot(incoming_x, incoming_y)
-  outgoing_length = math.hypot(outgoing_x, outgoing_y)
-
-  if incoming_length == 0 or outgoing_length == 0:
-    raise ValueError("Turn contains a zero-length segment.")
-
-  cross = (
-    incoming_x * outgoing_y
-    - incoming_y * outgoing_x
-  )
-
-  dot = (
-    incoming_x * outgoing_x
-    + incoming_y * outgoing_y
-  )
-
-  return math.degrees(math.atan2(abs(cross), dot))
-
-
 def identify_route_turns(
   segments: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -85,7 +48,7 @@ def identify_route_turns(
       outgoing["operational_end_coordinate"],
     )
 
-    if angle < TURN_MINIMUM_ANGLE_DEGREES:
+    if angle < MINIMUM_TURN_ANGLE_DEG:
       continue
 
     turns.append({

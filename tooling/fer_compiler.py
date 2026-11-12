@@ -57,8 +57,8 @@ from app.models.droneport_model import select_droneport_by_route_node_id
 from app.models.geospatial_model import (
     select_route_holding_coordinate,
 )
-from app.services.route_service import is_managed_route_node
-
+from app.services.route_service import is_managed_intersection
+from app.services.turn_service import is_managed_turn
 
 class FlightExecutionCompileError(ValueError):
     """Raised when a Flight Execution Record cannot be interpreted."""
@@ -531,6 +531,11 @@ def build_arrival_position_assertion(
                     "Landing-space assignment does not match "
                     "the Flight Execution arrival DronePort."
                 )
+
+        if landing_assignment is None:
+            raise FlightExecutionCompileError(
+                "Arrival DronePort requires a landing-space assignment."
+            )
 
         assigned_coordinate = landing_assignment.get(
             "coordinate"
@@ -1148,10 +1153,24 @@ def build_verified_route_mission_ranges(
             from_segment_index = intersection[
                 "from_route_segment_index"
             ]
+
             to_route_index = intersection["to_route_index"]
+
             to_segment_index = intersection[
                 "to_route_segment_index"
             ]
+
+            incoming_segment = next(
+                segment
+                for segment in compiler_ir["mission"][
+                    "route_conformance_segments"
+                ]
+                if (
+                    segment["route_index"] == route_index
+                    and segment["route_segment_index"]
+                    == from_segment_index
+                )
+            )
 
             if to_route_index == route_index:
                 departure_sequence = segment_mission_sequences[
@@ -1160,23 +1179,33 @@ def build_verified_route_mission_ranges(
             else:
                 departure_sequence = None
 
-            droneport = select_droneport_by_route_node_id(
-                intersection["route_node_id"]
-            )
+            if intersection["type"] == "turn":
+                longitude, latitude = incoming_segment[
+                    "end_coordinate"
+                ]
+                diameter_ft = incoming_segment["route_width_ft"]
+            else:
+                droneport = select_droneport_by_route_node_id(
+                    intersection["route_node_id"]
+                )
 
-            if droneport is None:
-                raise ValueError(
-                    "Managed intersection has no DronePort: "
-                    f"{intersection['route_node_id']}"
+                if droneport is None:
+                    raise ValueError(
+                        "Managed intersection has no DronePort: "
+                        f"{intersection['route_node_id']}"
+                    )
+
+                latitude = float(droneport["latitude"])
+                longitude = float(droneport["longitude"])
+                diameter_ft = float(
+                    droneport["droneport_diameter_ft"]
                 )
 
             managed_intersections.append({
                 **intersection,
-                "intersection_latitude": float(droneport["latitude"]),
-                "intersection_longitude": float(droneport["longitude"]),
-                "intersection_diameter_ft": float(
-                    droneport["droneport_diameter_ft"]
-                ),
+                "intersection_latitude": float(latitude),
+                "intersection_longitude": float(longitude),
+                "intersection_diameter_ft": float(diameter_ft),
                 "approach_mission_sequence": (
                     segment_mission_sequences[from_segment_index]
                 ),
@@ -1491,7 +1520,10 @@ def build_managed_intersections(
         if route_node_id is None:
             continue
 
-        if not is_managed_route_node(route_node_id):
+        if not (
+            is_managed_intersection(route_node_id)
+            or is_managed_turn(route_node_id)
+        ):
             continue
 
         route_index = incoming_segment["route_index"]
@@ -1565,7 +1597,14 @@ def build_managed_intersections(
             * pause_setback_ft / hold_setback_ft,
         ]
 
+        managed_type = (
+            "intersection"
+            if is_managed_intersection(route_node_id)
+            else "turn"
+        )
+
         managed_intersections.append({
+            "type": managed_type,
             "route_node_id": str(route_node_id),
             "from_route_id": current_parameters["route_id"],
             "to_route_id": next_parameters["route_id"],
@@ -2244,7 +2283,7 @@ def main() -> int:
 
         try:
             planned_deceleration_ft_s2 = (
-                validate_turn_aircraft_performance(aircraft)
+                validate_turn_aircraft_performance(aircraft, commanded_cruise_speed_ft_s)
             )
         except ValueError as exc:
             raise FlightExecutionCompileError(
