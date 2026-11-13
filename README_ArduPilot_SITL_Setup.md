@@ -129,6 +129,8 @@ ssh -N \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
     -R 127.0.0.1:15762:127.0.0.1:5762 \
+    -R 127.0.0.1:15772:127.0.0.1:5772 \
+    -R 127.0.0.1:15782:127.0.0.1:5782 \
     dronenavcp@api.dronenav.org
 ```
 
