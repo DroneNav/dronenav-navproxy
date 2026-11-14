@@ -152,6 +152,10 @@ from app.navproxy.rse.droneport_landing_assignment import (
     assign_droneport_landing_space,
 )
 
+from app.services.route_service import (
+    evaluate_route_segment_boundary_crossing as evaluate_route_segment_boundary_crossing_service,
+)
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -745,6 +749,7 @@ def _execute_flight_execution(
     intersection_auto_resume_requested_at: float | None = None
     intersection_grant_received_route_node_id = None
     intersection_grant_delivery_tag = None
+    intersection_grant_was_occupied = False
     intersection_hold_completed_route_node_id = None
     last_logged_intersection_state = None
     last_logged_intersection_route_node_id = None
@@ -825,6 +830,39 @@ def _execute_flight_execution(
         for telemetry in telemetry_iterable:
             last_telemetry = telemetry
 
+            if (
+                intersection_grant_delivery_tag is not None
+                and intersection_grant_received_route_node_id is not None
+            ):
+                pending_intersection_state = (
+                    get_flight_intersection_state(
+                        route_node_id=(
+                            intersection_grant_received_route_node_id
+                        ),
+                        flight_band_id=context.compiler_ir[
+                            "flight_band_id"
+                        ],
+                        assigned_relative_altitude_ft=context.compiler_ir[
+                            "assigned_relative_altitude_ft"
+                        ],
+                        flight_execution_id=context.flight_execution_id,
+                    )
+                )
+
+                if pending_intersection_state == "occupied":
+                    intersection_grant_was_occupied = True
+
+                elif (
+                    pending_intersection_state is None
+                    and intersection_grant_was_occupied
+                ):
+                    control_consumer.acknowledge(
+                        intersection_grant_delivery_tag
+                    )
+                    intersection_grant_delivery_tag = None
+                    intersection_grant_received_route_node_id = None
+                    intersection_grant_was_occupied = False
+
             control_messages = control_consumer.receive()
 
             for control_message in control_messages:
@@ -840,6 +878,7 @@ def _execute_flight_execution(
                     intersection_grant_delivery_tag = (
                         control_message["delivery_tag"]
                     )
+                    intersection_grant_was_occupied = False
                 elif message.get("message_type") == "intersection.granted":
                     if (
                         message["payload"]["route_node_id"]
@@ -1175,6 +1214,7 @@ def _execute_flight_execution(
                         )
                         intersection_grant_received_route_node_id = None
                         intersection_grant_delivery_tag = None
+                        intersection_grant_was_occupied = False
 
                 if (
                     intersection_state != last_logged_intersection_state
@@ -1212,6 +1252,7 @@ def _execute_flight_execution(
             test_pause_required = (
                 sitl_test_pause_enabled
                 and managed_intersection is not None
+                and managed_intersection["type"] == "intersection"
                 and intersection_state == "reserved"
                 and not test_pause_completed
             )
@@ -1492,6 +1533,7 @@ def _execute_flight_execution(
                 intersection_guided_requested_at = None
                 intersection_grant_received_route_node_id = None
                 intersection_grant_delivery_tag = None
+                intersection_grant_was_occupied = False
                 intersection_hold_completed_route_node_id = (
                     managed_intersection["route_node_id"]
                 )
@@ -1541,6 +1583,13 @@ def _execute_flight_execution(
                         active_route_segment_index=(
                             context.active_route_segment_index + 1
                         ),
+                    )
+
+                    from app.services.flight_execution_service import advance_flight_execution_route_segment
+
+                    advance_flight_execution_route_segment(
+                        context.flight_execution_id,
+                        context.active_route_segment_index,
                     )
 
                     LOGGER.debug(
@@ -2762,43 +2811,21 @@ def evaluate_route_segment_boundary_crossing(
     start_coordinate = segment["operational_start_coordinate"]
     end_coordinate = segment["operational_end_coordinate"]
 
-    endpoint = (
-        f"{DEFAULT_API_BASE_URL.rstrip('/')}"
-        f"/api/routes/segment-boundary-crossing"
-    )
+    result, error = evaluate_route_segment_boundary_crossing_service({
+        "latitude": telemetry.latitude,
+        "longitude": telemetry.longitude,
+        "start_latitude": start_coordinate[1],
+        "start_longitude": start_coordinate[0],
+        "end_latitude": end_coordinate[1],
+        "end_longitude": end_coordinate[0],
+    })
 
-    try:
-        response = requests.post(
-            endpoint,
-            json={
-                "latitude": telemetry.latitude,
-                "longitude": telemetry.longitude,
-                "start_latitude": start_coordinate[1],
-                "start_longitude": start_coordinate[0],
-                "end_latitude": end_coordinate[1],
-                "end_longitude": end_coordinate[0],
-            },
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            timeout=DEFAULT_API_TIMEOUT_SECONDS,
+    if error:
+        raise RuntimeError(
+            f"Could not evaluate Route segment boundary crossing: {error}"
         )
 
-        response.raise_for_status()
-        result = response.json()
-
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            f"Could not evaluate Route segment boundary crossing: {exc}"
-        ) from exc
-
-    except requests.JSONDecodeError as exc:
-        raise RuntimeError(
-            "Route segment boundary API returned invalid JSON."
-        ) from exc
-
-    return bool(result.get("crossed"))
+    return bool(result["crossed"])
 
 
 def evaluate_transition_point_containment(

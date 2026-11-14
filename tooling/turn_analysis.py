@@ -214,13 +214,13 @@ def analyze_flight(flight_execution_id, lane_coordinates):
 
 def main():
     route_ids = [
-        "01a0830a-4f1b-7f6e-84ef-c4836692f8ec",
         "01a08306-7a12-7b25-bc35-3995f3a21b63",
+        "01a0830a-4f1b-7f6e-84ef-c4836692f8ec",
+
     ]
 
     flights = {
-        "25 mph": "01a1ca22-2cc5-7aa6-acab-ecb3193ed953",
-        "10 mph": "01a1ca31-e8cc-7cf5-969b-7a1dbc8f96ca",
+        "Today's turn test": "01a1dc10-7197-7544-9ce5-2bf83f80cf3f",
     }
 
     lane_coordinates = load_operational_lane(route_ids)
