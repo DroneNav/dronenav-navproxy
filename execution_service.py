@@ -344,6 +344,11 @@ def _execute_flight_execution(
         and connection_string == "tcp:127.0.0.1:15762"
     )
 
+    sitl_turn_pause_enabled = (
+        os.environ.get("DRONENAV_SITL_TURN_PAUSE") == "1"
+        and connection_string == "tcp:127.0.0.1:15762"
+    )
+
     if NAVPROXY_FC_MODE not in {"simulator", "mavlink"}:
         raise RuntimeError(
             "NAVPROXY_FC_MODE must be 'simulator' or 'mavlink'. "
@@ -760,6 +765,13 @@ def _execute_flight_execution(
     test_pause_auto_resume_requested = False
     test_pause_auto_resume_requested_at: float | None = None
     test_pause_completed = False
+
+    turn_pause_guided_requested = False
+    turn_pause_target_sent = False
+    turn_pause_guided_requested_at: float | None = None
+    turn_pause_auto_resume_requested = False
+    turn_pause_auto_resume_requested_at: float | None = None
+    turn_pause_completed = False
 
     max_lane_offset_ft: float | None = None
     max_lane_offset_sequence: int | None = None
@@ -1377,6 +1389,151 @@ def _execute_flight_execution(
                         connection,
                         cruise_speed_ft_s * 0.3048,
                     )
+
+
+
+
+            turn_pause_required = (
+                sitl_turn_pause_enabled
+                and managed_intersection is not None
+                and managed_intersection["type"] == "turn"
+                and intersection_state == "reserved"
+                and not turn_pause_completed
+            )
+
+            if (
+                NAVPROXY_FC_MODE == "mavlink"
+                and turn_pause_required
+                and not turn_pause_guided_requested
+                and telemetry.flight_mode == "AUTO"
+            ):
+                release_file = "/tmp/dronenav_sitl_turn_release"
+
+                if os.path.exists(release_file):
+                    os.remove(release_file)
+
+                LOGGER.info(
+                    "SITL turn test: requesting GUIDED pause"
+                )
+
+                request_flight_mode(connection, "GUIDED")
+
+                turn_pause_guided_requested = True
+                turn_pause_guided_requested_at = time.monotonic()
+
+            if (
+                NAVPROXY_FC_MODE == "mavlink"
+                and turn_pause_guided_requested
+                and not turn_pause_target_sent
+                and telemetry.flight_mode == "GUIDED"
+            ):
+                pause_coordinate = managed_intersection[
+                    "test_pause_coordinate"
+                ]
+
+                altitude_msl_m = (
+                    segment["ground_elevation_ft"]
+                    + context.compiler_ir["assigned_relative_altitude_ft"]
+                ) * 0.3048
+
+                request_guided_position(
+                    connection,
+                    longitude=pause_coordinate[0],
+                    latitude=pause_coordinate[1],
+                    altitude_msl_m=altitude_msl_m,
+                )
+
+                LOGGER.info(
+                    "SITL turn test: GUIDED target sent: "
+                    "longitude=%s latitude=%s",
+                    pause_coordinate[0],
+                    pause_coordinate[1],
+                )
+
+                turn_pause_target_sent = True
+
+            if (
+                turn_pause_guided_requested
+                and not turn_pause_target_sent
+                and turn_pause_guided_requested_at is not None
+                and telemetry.flight_mode != "GUIDED"
+                and (
+                    time.monotonic()
+                    - turn_pause_guided_requested_at
+                    >= 5.0
+                )
+            ):
+                raise RuntimeError(
+                    "SITL turn test: GUIDED not confirmed "
+                    "within 5 seconds."
+                )
+
+            if (
+                turn_pause_target_sent
+                and not turn_pause_auto_resume_requested
+                and telemetry.flight_mode != "GUIDED"
+            ):
+                raise RuntimeError(
+                    "SITL turn test: unexpectedly exited GUIDED."
+                )
+
+            if (
+                sitl_turn_pause_enabled
+                and turn_pause_target_sent
+                and not turn_pause_auto_resume_requested
+                and os.path.exists(
+                    "/tmp/dronenav_sitl_turn_release"
+                )
+                and telemetry.flight_mode == "GUIDED"
+            ):
+                LOGGER.info(
+                    "SITL turn test: manual release, requesting AUTO"
+                )
+
+                request_flight_mode(connection, "AUTO")
+
+                turn_pause_auto_resume_requested = True
+                turn_pause_auto_resume_requested_at = time.monotonic()
+
+            if (
+                turn_pause_auto_resume_requested
+                and turn_pause_auto_resume_requested_at is not None
+                and telemetry.flight_mode != "AUTO"
+                and (
+                    time.monotonic()
+                    - turn_pause_auto_resume_requested_at
+                    >= 5.0
+                )
+            ):
+                raise RuntimeError(
+                    "SITL turn test: AUTO not confirmed "
+                    "within 5 seconds."
+                )
+
+            if (
+                turn_pause_auto_resume_requested
+                and telemetry.flight_mode == "AUTO"
+            ):
+                LOGGER.info(
+                    "SITL turn test: AUTO confirmed, pause completed"
+                )
+
+                turn_pause_completed = True
+                turn_pause_auto_resume_requested = False
+                turn_pause_auto_resume_requested_at = None
+
+                turn_pause_guided_requested = False
+                turn_pause_target_sent = False
+                turn_pause_guided_requested_at = None
+
+                if cruise_speed_ft_s is not None:
+                    request_ground_speed(
+                        connection,
+                        cruise_speed_ft_s * 0.3048,
+                    )
+
+
+
 
             if (
                 NAVPROXY_FC_MODE == "mavlink"
