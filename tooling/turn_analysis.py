@@ -1,3 +1,6 @@
+
+import argparse
+
 from app.navproxy.tooling.chsql import client
 from app.services.route_service import (
     evaluate_route_segment_conformance,
@@ -42,6 +45,7 @@ def load_operational_lane(route_ids):
         segment_widths_ft=combined_widths,
         side="right",
     )
+
 
 def load_turn_observations(flight_execution_id):
     result = client.query(
@@ -163,7 +167,11 @@ def evaluate_turn_observation(observation, lane_coordinates):
     }
 
 
-def analyze_flight(flight_execution_id, lane_coordinates):
+def analyze_flight(
+    flight_execution_id,
+    lane_coordinates,
+    route_ids,
+):
     observations = load_turn_observations(flight_execution_id)
     turns = {}
 
@@ -197,6 +205,12 @@ def analyze_flight(flight_execution_id, lane_coordinates):
             summary["violations"] += 1
 
     print(f"\nFlight: {flight_execution_id}")
+    print("Routes:")
+
+    for route_id in route_ids:
+        print(f"  {route_id}")
+
+    print()
     print(
         "Turn    Angle    Samples    "
         "Max offset    Violations"
@@ -213,27 +227,38 @@ def analyze_flight(flight_execution_id, lane_coordinates):
 
 
 def main():
-    route_ids = [
-        "01a08306-7a12-7b25-bc35-3995f3a21b63",
-        "01a0830a-4f1b-7f6e-84ef-c4836692f8ec",
+    parser = argparse.ArgumentParser(
+        description="Analyze DroneNav governed turn observations."
+    )
 
-    ]
+    parser.add_argument(
+        "--routes",
+        nargs="+",
+        required=True,
+        metavar="ROUTE_ID",
+        help="Ordered Route IDs defining the operational lane",
+    )
 
-    flights = {
-        "Today's turn test": "01a1dc10-7197-7544-9ce5-2bf83f80cf3f",
-    }
+    parser.add_argument(
+        "--flights",
+        nargs="+",
+        required=True,
+        metavar="FLIGHT_EXECUTION_ID",
+        help="Flight Execution IDs to analyze",
+    )
 
-    lane_coordinates = load_operational_lane(route_ids)
+    args = parser.parse_args()
 
-    for speed, flight_execution_id in flights.items():
-        print(f"\nGoverned cruise speed: {speed}")
+    lane_coordinates = load_operational_lane(args.routes)
+
+    for flight_execution_id in args.flights:
         analyze_flight(
             flight_execution_id,
             lane_coordinates,
+            args.routes,
         )
 
 
 if __name__ == "__main__":
     main()
-
 
