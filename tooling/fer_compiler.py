@@ -32,6 +32,8 @@ from app.config.constants import (
     DEFAULT_API_TIMEOUT_SECONDS,
     TRANSITION_DIAMETER_FT,
     VERTICAL_CONFORMANCE_MARGIN_FT,
+    DROP_ADDRESS_DELIVERY_ALTITUDE_AGL_FT,
+    DROP_ADDRESS_DELIVERY_HOVER_SECONDS,
 )
 
 from app.services.elevation_service import (
@@ -59,6 +61,10 @@ from app.models.geospatial_model import (
 )
 from app.services.route_service import is_managed_intersection
 from app.services.turn_service import is_managed_turn
+
+from app.services.residential_destination_service import (
+    get_residential_destination_by_id,
+)
 
 class FlightExecutionCompileError(ValueError):
     """Raised when a Flight Execution Record cannot be interpreted."""
@@ -871,6 +877,61 @@ def build_operational_route_assertions(
     return operational_route_assertions
 
 
+def build_return_route_assertions(
+    outbound_route_assertions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Construct return traversal from outbound operational Routes."""
+
+    return_route_assertions = []
+
+    for route_assertion in reversed(outbound_route_assertions):
+        parameters = route_assertion["parameters"]
+        coordinates = parameters["coordinates"]
+
+        return_connections = [
+            {
+                **connection,
+                "waypoint_index": (
+                    len(coordinates) - 1 - connection["waypoint_index"]
+                ),
+            }
+            for connection in parameters["route_node_connections"]
+        ]
+
+        return_connections.sort(
+            key=lambda connection: connection["waypoint_index"]
+        )
+
+        return_route_assertions.append({
+            **route_assertion,
+            "parameters": {
+                **parameters,
+                "coordinates": [
+                    list(coordinate)
+                    for coordinate in reversed(coordinates)
+                ],
+                "segment_attributes": [
+                    dict(attributes)
+                    for attributes in reversed(
+                        parameters["segment_attributes"]
+                    )
+                ],
+                "operational_origin_route_node_id": parameters[
+                    "operational_destination_route_node_id"
+                ],
+                "operational_destination_route_node_id": parameters[
+                    "operational_origin_route_node_id"
+                ],
+                "operational_reversed": not parameters[
+                    "operational_reversed"
+                ],
+                "route_node_connections": return_connections,
+            },
+        })
+
+    return return_route_assertions
+
+
 def build_route_lane_coordinates(
     route_assertion: dict[str, Any],
     side: str,
@@ -1336,6 +1397,8 @@ def build_mission_items(
     assigned_relative_altitude_ft: int | float,
     arrival_coordinate: list[float],
     failsafe_branches: list[dict[str, Any]],
+    drop_address: dict[str, Any] | None = None,
+    outbound_waypoint_count: int | None = None,
 ) -> list[dict[str, Any]]:
     """Build the ordered DroneNav mission stream."""
 
@@ -1411,6 +1474,29 @@ def build_mission_items(
         }
     ]
 
+    drop_address_coordinate = None
+    drop_address_altitude_meters = None
+
+    if drop_address is not None:
+        if (
+            outbound_waypoint_count is None
+            or outbound_waypoint_count <= 0
+            or outbound_waypoint_count >= len(waypoint_coordinates)
+        ):
+            raise FlightExecutionCompileError(
+                "Invalid outbound waypoint count for Drop Address flight."
+            )
+
+        drop_address_coordinate = [
+            drop_address["longitude"],
+            drop_address["latitude"],
+        ]
+
+        drop_address_altitude_meters = absolute_altitude_meters(
+            drop_address["ground_elevation_ft"],
+            DROP_ADDRESS_DELIVERY_ALTITUDE_AGL_FT,
+        )
+
     for waypoint_index, (coordinate, altitude_meters) in enumerate(
         zip(
             waypoint_coordinates,
@@ -1427,6 +1513,33 @@ def build_mission_items(
                 "altitude_meters": altitude_meters,
             },
         })
+
+        if (
+            drop_address is not None
+            and waypoint_index + 1 == outbound_waypoint_count
+        ):
+            mission_items.append({
+                "sequence": len(mission_items),
+                "command": "MAV_CMD_NAV_WAYPOINT",
+                "operational_phase": "drop_address",
+                "parameters": {
+                    "latitude": drop_address_coordinate[1],
+                    "longitude": drop_address_coordinate[0],
+                    "altitude_meters": drop_address_altitude_meters,
+                },
+            })
+
+            mission_items.append({
+                "sequence": len(mission_items),
+                "command": "MAV_CMD_NAV_LOITER_TIME",
+                "operational_phase": "drop_address",
+                "parameters": {
+                    "latitude": drop_address_coordinate[1],
+                    "longitude": drop_address_coordinate[0],
+                    "altitude_meters": drop_address_altitude_meters,
+                    "time_seconds": DROP_ADDRESS_DELIVERY_HOVER_SECONDS,
+                },
+            })
 
     mission_items.append({
         "sequence": len(mission_items),
@@ -1729,6 +1842,30 @@ def interpret_flight_execution(
             "flight_execution is missing flight_execution_id."
         )
 
+    destination_type = flight_execution.get(
+        "destination_type",
+        "droneport",
+    )
+
+    drop_address = None
+
+    if destination_type == "drop_address":
+        drop_address_id = flight_execution.get("drop_address_id")
+
+        if not drop_address_id:
+            raise FlightExecutionCompileError(
+                "Drop Address Flight Execution is missing drop_address_id."
+            )
+
+        drop_address = get_residential_destination_by_id(
+            drop_address_id
+        )
+
+        if drop_address is None:
+            raise FlightExecutionCompileError(
+                f"Drop Address not found: {drop_address_id}"
+            )
+
     assertions: list[dict[str, Any]] = []
 
     launch_assertion = build_launch_position_assertion(
@@ -1793,6 +1930,15 @@ def interpret_flight_execution(
         departure_route_node_id=departure_route_node_id,
     )
 
+    outbound_route_assertions = route_assertions
+
+    return_route_assertions = []
+
+    if destination_type == "drop_address":
+        return_route_assertions = build_return_route_assertions(
+            outbound_route_assertions
+        )
+
     for route_assertion in route_assertions:
         assertions.append({
                 "sequence": len(assertions),
@@ -1800,27 +1946,84 @@ def interpret_flight_execution(
         })
 
     waypoint_coordinates = build_route_lane_waypoint_coordinates(
-        route_assertions,
+        outbound_route_assertions,
         side="right",
     )
 
+    if destination_type == "drop_address":
+        waypoint_coordinates.extend(
+            build_route_lane_waypoint_coordinates(
+                return_route_assertions,
+                side="right",
+            )
+        )
+
     waypoint_altitudes = build_route_waypoint_altitudes(
-        route_assertions,
+        outbound_route_assertions,
         assigned_relative_altitude_ft,
     )
+
+    if destination_type == "drop_address":
+        waypoint_altitudes.extend(
+            build_route_waypoint_altitudes(
+                return_route_assertions,
+                assigned_relative_altitude_ft,
+            )
+        )
+
+    if destination_type == "drop_address":
+        route_assertions = (
+            outbound_route_assertions
+            + return_route_assertions
+        )
 
     route_waypoint_ranges = build_route_waypoint_ranges(
         route_assertions
     )
 
     route_conformance_segments = build_route_conformance_segments(
-        route_assertions,
+        outbound_route_assertions,
         side="right",
     )
 
-    route_turns = identify_route_turns(
-        route_conformance_segments,
-    )
+    if destination_type == "drop_address":
+        return_conformance_segments = build_route_conformance_segments(
+            return_route_assertions,
+            side="right",
+        )
+
+        route_index_offset = len(outbound_route_assertions)
+
+        for segment in return_conformance_segments:
+            segment["route_index"] += route_index_offset
+
+        route_conformance_segments.extend(
+            return_conformance_segments
+        )
+
+    if destination_type == "drop_address":
+        outbound_segment_count = len(
+            route_conformance_segments
+        ) - len(return_conformance_segments)
+
+        route_turns = identify_route_turns(
+            route_conformance_segments[:outbound_segment_count]
+        )
+
+        return_turns = identify_route_turns(
+            return_conformance_segments
+        )
+
+        for turn in return_turns:
+            turn["incoming_segment_index"] += outbound_segment_count
+            turn["outgoing_segment_index"] += outbound_segment_count
+
+        route_turns.extend(return_turns)
+
+    else:
+        route_turns = identify_route_turns(
+            route_conformance_segments,
+        )
 
     launch_parameters = launch_assertion["parameters"]
     departure_coordinate = launch_parameters["coordinate"]
@@ -1830,15 +2033,51 @@ def interpret_flight_execution(
         departure_coordinate,
     )
 
-    managed_intersections = build_managed_intersections(
-        route_assertions,
-        route_conformance_segments,
-        side="right",
-    )
+    if destination_type == "drop_address":
+        outbound_segment_count = len(
+            route_conformance_segments
+        ) - len(return_conformance_segments)
 
-    route_transitions = build_route_transitions(
-        route_assertions
-    )
+        managed_intersections = build_managed_intersections(
+            outbound_route_assertions,
+            route_conformance_segments[:outbound_segment_count],
+            side="right",
+        )
+
+        managed_intersections.extend(
+            build_managed_intersections(
+                route_assertions,
+                return_conformance_segments,
+                side="right",
+            )
+        )
+
+        route_transitions = build_route_transitions(
+            outbound_route_assertions
+        )
+
+        return_transitions = build_route_transitions(
+            return_route_assertions
+        )
+
+        route_index_offset = len(outbound_route_assertions)
+
+        for transition in return_transitions:
+            transition["from_route_index"] += route_index_offset
+            transition["to_route_index"] += route_index_offset
+
+        route_transitions.extend(return_transitions)
+
+    else:
+        managed_intersections = build_managed_intersections(
+            route_assertions,
+            route_conformance_segments,
+            side="right",
+        )
+
+        route_transitions = build_route_transitions(
+            route_assertions
+        )
 
     departure_transition = build_departure_transition(
         launch_assertion,
@@ -1848,6 +2087,15 @@ def interpret_flight_execution(
     arrival_transition = build_arrival_transition(
         landing_coordinate,
         route_conformance_segments,
+    )
+
+    outbound_waypoint_count = (
+        sum(
+            len(route["parameters"]["coordinates"])
+            for route in outbound_route_assertions
+        )
+        if destination_type == "drop_address"
+        else None
     )
 
     mission_items = build_mission_items(
@@ -1860,7 +2108,34 @@ def interpret_flight_execution(
         assigned_relative_altitude_ft=assigned_relative_altitude_ft,
         arrival_coordinate=landing_coordinate,
         failsafe_branches=failsafe_branches,
+        drop_address=drop_address,
+        outbound_waypoint_count=outbound_waypoint_count,
     )
+
+    drop_address_excursion = None
+
+    if destination_type == "drop_address":
+        network_waypoints = {
+            item["waypoint_index"]: item["sequence"]
+            for item in mission_items
+            if "waypoint_index" in item
+        }
+
+        terminal_transition = build_arrival_transition(
+            arrival_assertion["parameters"]["coordinate"],
+            route_conformance_segments[:outbound_segment_count],
+        )
+
+        drop_address_excursion = {
+            "exit_sequence": network_waypoints[
+                outbound_waypoint_count - 1
+            ],
+            "reentry_sequence": network_waypoints[
+                outbound_waypoint_count
+            ],
+            "return_segment_index": outbound_segment_count,
+            "terminal_transition": terminal_transition,
+        }
 
     failsafe_jump_map = build_failsafe_jump_map(
         mission_items=mission_items,
@@ -1887,6 +2162,7 @@ def interpret_flight_execution(
             "failsafe_jump_map": failsafe_jump_map,
             "arrival_transition": arrival_transition,
             "mission_items": mission_items,
+            "drop_address_excursion": drop_address_excursion,
         },
     }
 

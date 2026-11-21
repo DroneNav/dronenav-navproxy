@@ -87,10 +87,10 @@ from app.navproxy.fc_adapters.ardupilot_failsafe_recovery import (
     program_failsafe_recovery_map,
 )
 from app.navproxy.fc_adapters.ardupilot import (
+    normalize_ardupilot_mission_sequence,
     expected_frame_class,
 )
 from app.navproxy.scheduled_mission_validator import (
-    normalize_ardupilot_mission_sequence,
     validate_programmed_scheduled_mission,
 )
 from app.navproxy.tooling.program_scheduled_mission import (
@@ -117,6 +117,7 @@ from app.services.aircraft_service import (
 )
 from app.services.route_service import (
     evaluate_route_segment_conformance,
+    evaluate_transition_point_containment as evaluate_transition_point_containment_service,
 )
 from .turns.aircraft_performance import (
     validate_turn_aircraft_performance,
@@ -1129,6 +1130,81 @@ def _execute_flight_execution(
             ):
                 continue
 
+            excursion = context.compiler_ir["mission"].get(
+                "drop_address_excursion"
+            )
+
+            if (
+                excursion is not None
+                and NAVPROXY_FC_MODE == "mavlink"
+                and telemetry.mission_sequence is not None
+                and context.active_operational_element == "route"
+            ):
+                normalized_sequence = normalize_ardupilot_mission_sequence(
+                    telemetry.mission_sequence
+                )
+
+                if (
+                    excursion["exit_sequence"]
+                    < normalized_sequence
+                    < excursion["reentry_sequence"]
+                ):
+                    context = replace(
+                        context,
+                        active_operational_element="off_network",
+                    )
+
+                    LOGGER.info(
+                        "Transitioned from Route authority to off_network: "
+                        "sequence=%s",
+                        telemetry.mission_sequence,
+                    )
+
+            if (
+                excursion is not None
+                and NAVPROXY_FC_MODE == "mavlink"
+                and telemetry.mission_sequence is not None
+                and context.active_operational_element == "off_network"
+            ):
+                normalized_sequence = normalize_ardupilot_mission_sequence(
+                    telemetry.mission_sequence
+                )
+
+                if normalized_sequence >= excursion["reentry_sequence"]:
+                    transition = excursion["terminal_transition"]
+
+                    result, error = (
+                        evaluate_transition_point_containment_service(
+                            {
+                                "latitude": telemetry.latitude,
+                                "longitude": telemetry.longitude,
+                                "center_latitude": transition["coordinate"][1],
+                                "center_longitude": transition["coordinate"][0],
+                                "diameter_ft": transition["diameter_ft"],
+                            }
+                        )
+                    )
+
+                    if error:
+                        raise RuntimeError(
+                            f"Could not evaluate network reentry: {error}"
+                        )
+
+                    if result["inside"]:
+                        context = replace(
+                            context,
+                            active_operational_element="route",
+                            active_route_segment_index=excursion[
+                                "return_segment_index"
+                            ],
+                        )
+
+                        LOGGER.info(
+                            "Transitioned from off_network to Route authority: "
+                            "sequence=%s",
+                            telemetry.mission_sequence,
+                        )
+
             if (
                 context.active_operational_element
                 in {"arrival_transition", "failsafe_recovery"}
@@ -1723,7 +1799,8 @@ def _execute_flight_execution(
                     continue
 
             if (
-                segment is not None
+                context.active_operational_element == "route"
+                and segment is not None
                 and not intersection_guided_requested
                 and not intersection_auto_resume_requested
             ):

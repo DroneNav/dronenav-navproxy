@@ -235,3 +235,11 @@ def expected_frame_class(
     return frame_classes[aircraft_type]
 
 
+def normalize_ardupilot_mission_sequence(
+    sequence: int,
+) -> int:
+    """Convert an ArduPilot mission sequence to DroneNav mission indexing."""
+
+    return sequence - 1
+
+

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pymavlink import mavutil
 
 from app.navproxy.tooling.download_mission import download_mission
+from app.navproxy.fc_adapters.ardupilot import normalize_ardupilot_mission_sequence
 
 from typing import Any
 
@@ -10,13 +11,6 @@ from typing import Any
 class ScheduledMissionValidationError(RuntimeError):
     """Raised when the programmed FC mission does not match the approved mission."""
 
-
-def normalize_ardupilot_mission_sequence(
-    sequence: int,
-) -> int:
-    """Convert an ArduPilot mission sequence to DroneNav mission indexing."""
-
-    return sequence - 1
 
 
 def expected_command_id(
